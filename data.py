@@ -1,8 +1,7 @@
 import torch
 from torch.utils.data import Dataset
-from torchaudio import load
 from torchaudio.functional import resample
-
+import soundfile as sf
 import numpy
 from extraUtils.misc import get_leaf_files
 
@@ -16,7 +15,7 @@ class VCTKCorpus(Dataset):
         self.dsf = dsf
         self.files = get_leaf_files(path=path, ender=('.mp4', '.wav'))
         numpy.random.shuffle(self.files)
-        self.files = self.files[:min(limit,len(self.files))]
+        self.files = self.files[:int(min(limit,len(self.files)))]
         self.target_sr = 48000
         self.segment_size = int(self.target_sr * 0.3)
         
@@ -25,7 +24,13 @@ class VCTKCorpus(Dataset):
     
     def __getitem__(self, index):
         
-        hrw, sr = load(self.files[index], channels_first=True)
+        data, sr = sf.read(self.files[index])
+        hrw = torch.from_numpy(data).float()
+        if hrw.ndim == 1:
+            hrw = hrw.unsqueeze(0)
+        else:
+            hrw = hrw.transpose(0, 1)
+
         if sr != self.target_sr:
             hrw = resample(hrw, sr, self.target_sr)
         
@@ -40,3 +45,6 @@ class VCTKCorpus(Dataset):
         maxAmp = torch.clamp(lrw.abs().max(), 1e-6)
         
         return lrw / maxAmp, hrw / maxAmp
+    
+dataset2x = VCTKCorpus(dsf=2)
+dataset4x = VCTKCorpus(dsf=4)

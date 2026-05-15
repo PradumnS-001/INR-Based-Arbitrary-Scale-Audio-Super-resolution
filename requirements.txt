@@ -7,3 +7,5 @@ torchview
 matplotlib
 ptwt
 seaborn
+tqdm
+soundfile
