@@ -40,7 +40,7 @@ class LISA(nn.Module):
         t_hr = t_hr.unsqueeze(0).repeat(B, 1)
         
         if self.training:
-            eta = torch.randn_like(t_hr) * 1.0
+            eta = torch.randn_like(t_hr) * 0.4
             t_query = t_hr + eta
         else:
             t_query = t_hr
