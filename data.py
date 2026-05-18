@@ -9,21 +9,21 @@ BASE_PATH = 'Data'
 
 class VCTKCorpus(Dataset):
     
-    def __init__(self, path:str=BASE_PATH, limit:int=200e4)->None:
+    def __init__(self, path:str=BASE_PATH, limit:int=200e4, hsr:int=24000)->None:
         super().__init__()
         
         self.files = get_leaf_files(path=path, ender=('.mp4', '.wav'))
         numpy.random.shuffle(self.files)
         self.files = self.files[:int(min(limit,len(self.files)))]
-        self.target_sr = 48000
-        self.segment_size = int(self.target_sr * 0.5)
+        self.lsr = 8000
+        self.hsr = hsr
+        self.segment_size = int(self.hsr * 0.5)
         
     def __len__(self):
         return len(self.files)
     
-    def __getitem__(self, index):
+    def __getitem__(self, index)->tuple[torch.Tensor]:
         
-        dsf = numpy.random.uniform(2.0,5.0)
         data, sr = sf.read(self.files[index])
         hrw = torch.from_numpy(data).float()
         if hrw.ndim == 1:
@@ -31,19 +31,17 @@ class VCTKCorpus(Dataset):
         else:
             hrw = hrw.transpose(0, 1)
 
-        if sr != self.target_sr:
-            hrw = resample(hrw, sr, self.target_sr)
-        
-        if hrw.shape[-1] > self.segment_size:
-            start = torch.randint(0, hrw.shape[-1] - self.segment_size + 1, (1,))
-            hrw = hrw[:, start : start + self.segment_size]
+        orig_segment_size = int(sr * 0.5)
+        if hrw.shape[-1] > orig_segment_size:
+            start = torch.randint(0, hrw.shape[-1] - orig_segment_size + 1, (1,))
+            hrw = hrw[:, start : start + orig_segment_size]
         else:
-            hrw = torch.nn.functional.pad(hrw, (0, self.segment_size - hrw.shape[-1]))
+            hrw = torch.nn.functional.pad(hrw, (0, orig_segment_size - hrw.shape[-1]))
         
-        lrw = resample(hrw, int(dsf * 1000), 1000)
-        lrw = lrw[:, :int(self.target_sr/dsf)]
-        maxAmp = torch.clamp(lrw.abs().max(), 1e-6)
+        if sr != self.hsr:
+            hrw = resample(hrw, sr, self.hsr)
+        lrw = resample(hrw, self.hsr, self.lsr)
         
-        return lrw / maxAmp, hrw / maxAmp
+        return lrw, hrw
     
-dataset2x = VCTKCorpus()
+dataset2x:tuple[torch.Tensor] = VCTKCorpus()
