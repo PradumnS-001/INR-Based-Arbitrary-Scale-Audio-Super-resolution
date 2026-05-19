@@ -117,19 +117,24 @@ def evaluate_and_save(model_path, model_name, device):
             pesq_metric(pred_16k, hr_16k)
 
             # --- Artifact Saving Logic ---
-            # Save 4 pairs of audio clips (8 audio clips total per model)
+            # Save 4 sets of audio clips (LR, SR, and HR ground truth)
             if saved_audio_count < 4:
                 lr_save_path = os.path.join('audio', f"{model_name}_sample{saved_audio_count}_LR.wav")
                 pred_save_path = os.path.join('audio', f"{model_name}_sample{saved_audio_count}_SR.wav")
+                hr_save_path = os.path.join('audio', f"{model_name}_sample{saved_audio_count}_HR.wav")
                 
                 lr_np = lr_wav[0].cpu().numpy()
                 pred_np = pred[0].cpu().numpy()
+                hr_np = hr_wav[0].cpu().numpy()
                 
                 if lr_np.ndim == 2: lr_np = lr_np.T
                 if pred_np.ndim == 2: pred_np = pred_np.T
+                if hr_np.ndim == 2: hr_np = hr_np.T
                     
                 sf.write(lr_save_path, lr_np, low_sampling_rate)
                 sf.write(pred_save_path, pred_np, hsr_new)
+                sf.write(hr_save_path, hr_np, hsr_new)
+                
                 saved_audio_count += 1
             
             # Save 2 mel spectrogram comparisons
