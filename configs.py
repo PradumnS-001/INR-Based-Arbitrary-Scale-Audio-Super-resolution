@@ -4,7 +4,7 @@ limit = 200e4
 BASE_PATH = 'Data'
 seed = 67
 
-val_scale = 3
+val_scale = 2
 lr = 1e-3
 epochs = 50
 gamma = 0.5

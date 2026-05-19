@@ -11,14 +11,18 @@ generator = torch.Generator().manual_seed(seed)
 
 class VCTKCorpus(Dataset):
     
-    def __init__(self, path:str=BASE_PATH, limit:int=limit, lsr:int=low_sampling_rate, hsr:int=high_sampling_rate)->None:
+    def __init__(self, path:str=BASE_PATH, limit:int=limit, lsr:int=low_sampling_rate, hsr:int=high_sampling_rate, trunc:bool=True, file_list:list[str]=None)->None:
         super().__init__()
         
-        self.files = get_leaf_files(path=path, ender=('.mp4', '.wav'))
-        numpy.random.shuffle(self.files)
-        self.files = self.files[:int(min(limit,len(self.files)))]
+        if file_list is None:
+            self.files = get_leaf_files(path=path, ender=('.mp4', '.wav'))
+            numpy.random.shuffle(self.files)
+            self.files = self.files[:int(min(limit,len(self.files)))]
+        else:
+            self.files = file_list
         self.lsr = lsr
         self.hsr = hsr
+        self.trunc = trunc
         
     def __len__(self):
         return len(self.files)
@@ -32,12 +36,13 @@ class VCTKCorpus(Dataset):
         else:
             hrw = hrw.transpose(0, 1)
 
-        orig_segment_size = int(sr * 0.5)
-        if hrw.shape[-1] > orig_segment_size:
-            start = torch.randint(0, hrw.shape[-1] - orig_segment_size + 1, (1,))
-            hrw = hrw[:, start : start + orig_segment_size]
-        else:
-            hrw = torch.nn.functional.pad(hrw, (0, orig_segment_size - hrw.shape[-1]))
+        if self.trunc:
+            orig_segment_size = int(sr * 0.5)
+            if hrw.shape[-1] > orig_segment_size:
+                start = torch.randint(0, hrw.shape[-1] - orig_segment_size + 1, (1,))
+                hrw = hrw[:, start : start + orig_segment_size]
+            else:
+                hrw = torch.nn.functional.pad(hrw, (0, orig_segment_size - hrw.shape[-1]))
         
         if sr != self.hsr:
             hrw = resample(hrw, sr, self.hsr)
@@ -53,3 +58,8 @@ tr_set, val_set = random_split(dataset, [tr_len, val_len], generator=generator)
 batch_size = 32
 tr_loader = DataLoader(tr_set, batch_size=batch_size, shuffle=True, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4)
 val_loader = DataLoader(val_set, batch_size=batch_size, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4)
+
+val12_indices = val_set.indices[:12]
+val12_files = [dataset.files[i] for i in val12_indices]
+val12_set = VCTKCorpus(file_list=val12_files, trunc=False)
+val12_loader = DataLoader(val12_set, batch_size=1, shuffle=False, num_workers=0)
