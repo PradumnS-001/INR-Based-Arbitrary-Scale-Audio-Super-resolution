@@ -18,7 +18,7 @@ def plot_mel_spectrogram(y_true, y_pred, sr, save_path):
     Generates a side-by-side Mel Spectrogram comparison and saves it to disk.
     """
     # Define transforms
-    mel_transform = torchaudio.transforms.MelSpectrogram(sample_rate=sr, n_mels=80)
+    mel_transform = torchaudio.transforms.MelSpectrogram(sample_rate=sr, n_mels=80, n_fft=1024)
     db_transform = torchaudio.transforms.AmplitudeToDB(top_db=80)
 
     # Convert to decibel mel-spectrograms
