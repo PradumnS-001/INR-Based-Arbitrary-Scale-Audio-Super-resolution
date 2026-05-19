@@ -1,23 +1,24 @@
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, random_split, DataLoader
 from torchaudio.functional import resample
 import soundfile as sf
 import numpy
 from extraUtils.misc import get_leaf_files
+from configs import *
 
-BASE_PATH = 'Data'
+numpy.random.seed(seed)
+generator = torch.Generator().manual_seed(seed)
 
 class VCTKCorpus(Dataset):
     
-    def __init__(self, path:str=BASE_PATH, limit:int=200e4, hsr:int=24000)->None:
+    def __init__(self, path:str=BASE_PATH, limit:int=limit, lsr:int=low_sampling_rate, hsr:int=high_sampling_rate)->None:
         super().__init__()
         
         self.files = get_leaf_files(path=path, ender=('.mp4', '.wav'))
         numpy.random.shuffle(self.files)
         self.files = self.files[:int(min(limit,len(self.files)))]
-        self.lsr = 8000
+        self.lsr = lsr
         self.hsr = hsr
-        self.segment_size = int(self.hsr * 0.5)
         
     def __len__(self):
         return len(self.files)
@@ -44,4 +45,11 @@ class VCTKCorpus(Dataset):
         
         return lrw, hrw
     
-dataset2x:tuple[torch.Tensor] = VCTKCorpus()
+dataset = VCTKCorpus()
+tr_len = int(0.9 * len(dataset))
+val_len = len(dataset) - tr_len
+tr_set, val_set = random_split(dataset, [tr_len, val_len], generator=generator)
+
+batch_size = 32
+tr_loader = DataLoader(tr_set, batch_size=batch_size, shuffle=True, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4)
+val_loader = DataLoader(val_set, batch_size=batch_size, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4)

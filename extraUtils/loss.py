@@ -7,7 +7,7 @@ class MultiScaleSpectralLoss(nn.Module):
     Implements the Multi-resolution STFT loss.
     Consists of Spectral Convergence (L2) and Log STFT Magnitude (L1) losses.
     """
-    def __init__(self, n_ffts=[600, 1200, 240]):
+    def __init__(self, n_ffts=[2048, 512]):
         super().__init__()
         self.n_ffts = n_ffts
 
@@ -17,7 +17,7 @@ class MultiScaleSpectralLoss(nn.Module):
         
         total_loss = 0
         for n in self.n_ffts:
-            hop = n // 5
+            hop = n // 4
             window = torch.hann_window(n, device=x.device)
             
             s_hat = torch.stft(x_hat, n, hop_length=hop, window=window, return_complex=True).abs()
