@@ -9,15 +9,16 @@ from configs import *
 numpy.random.seed(seed)
 generator = torch.Generator().manual_seed(seed)
 
-class VCTKCorpus(Dataset):
+class AudioCorpus(Dataset):
     
-    def __init__(self, path:str=BASE_PATH, limit:int=limit, lsr:int=low_sampling_rate, hsr:int=high_sampling_rate, trunc:bool=True, file_list:list[str]=None)->None:
+    def __init__(self, path:str=BASE_PATH, limit:int | None=limit, lsr:int=low_sampling_rate, hsr:int=high_sampling_rate, trunc:bool=True, file_list:list[str]=None)->None:
         super().__init__()
         
         if file_list is None:
-            self.files = get_leaf_files(path=path, ender=('.mp4', '.wav'))
+            self.files = get_leaf_files(path=path, ender=('.mp4', '.wav', '.flac'))
             numpy.random.shuffle(self.files)
-            self.files = self.files[:int(min(limit,len(self.files)))]
+            kk = int(min(limit,len(self.files))) if limit is not None else len(self.files)
+            self.files = self.files[:kk]
         else:
             self.files = file_list
         self.lsr = lsr
@@ -37,7 +38,7 @@ class VCTKCorpus(Dataset):
             hrw = hrw.transpose(0, 1)
 
         if self.trunc:
-            orig_segment_size = int(sr * 0.5)
+            orig_segment_size = int(sr * clip_size_sec)
             if hrw.shape[-1] > orig_segment_size:
                 start = torch.randint(0, hrw.shape[-1] - orig_segment_size + 1, (1,))
                 hrw = hrw[:, start : start + orig_segment_size]
@@ -50,7 +51,7 @@ class VCTKCorpus(Dataset):
         
         return lrw, hrw
     
-dataset = VCTKCorpus()
+dataset = AudioCorpus()
 tr_len = int(0.9 * len(dataset))
 val_len = len(dataset) - tr_len
 tr_set, val_set = random_split(dataset, [tr_len, val_len], generator=generator)
@@ -61,5 +62,5 @@ val_loader = DataLoader(val_set, batch_size=batch_size, num_workers=4, persisten
 
 val12_indices = val_set.indices[:12]
 val12_files = [dataset.files[i] for i in val12_indices]
-val12_set = VCTKCorpus(file_list=val12_files, trunc=False)
+val12_set = AudioCorpus(file_list=val12_files, trunc=False)
 val12_loader = DataLoader(val12_set, batch_size=1, shuffle=False, num_workers=0)
