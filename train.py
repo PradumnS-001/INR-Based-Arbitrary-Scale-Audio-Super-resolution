@@ -9,7 +9,7 @@ import os
 from data import tr_loader, val_loader
 from configs import *
 from models import LISA
-from extraUtils.loss import MultiScaleSpectralLoss, log_spectral_distance
+from extraUtils.loss import WaveLoss, log_spectral_distance
 from torchmetrics.audio import SignalNoiseRatio
 
 def main():
@@ -18,7 +18,7 @@ def main():
     print(device)
     torch.backends.cudnn.benchmark = False
 
-    mssl = MultiScaleSpectralLoss()
+    mssl = WaveLoss()
     snr_metric = SignalNoiseRatio().to(device)
 
     model = LISA().to(device)
@@ -42,13 +42,14 @@ def main():
             with torch.no_grad(): hr_wav = resample(hr_wav, high_sampling_rate, hsr_new)
             
             hr_wav:torch.Tensor = hr_wav.to(device)
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             
-            pred = model(lr_wav, scale=scale)
+            pred = model(lr_wav, scale=scale).squeeze(1)
             min_len = min(pred.shape[-1],hr_wav.shape[-1])
             pred, hr_wav = pred[...,:min_len], hr_wav[...,:min_len]
             
-            loss:torch.Tensor = mssl_wt * mssl(pred, hr_wav) + l1_wt * F.l1_loss(pred, hr_wav)
+            waveloss = mssl(pred, hr_wav)
+            loss:torch.Tensor = mssl_wt * waveloss[0] + l1_wt * F.l1_loss(pred, hr_wav)
             
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)

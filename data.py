@@ -11,11 +11,17 @@ generator = torch.Generator().manual_seed(seed)
 
 class AudioCorpus(Dataset):
     
-    def __init__(self, path:str=BASE_PATH, limit:int | None=limit, lsr:int=low_sampling_rate, hsr:int=high_sampling_rate, trunc:bool=True, file_list:list[str]=None)->None:
+    def __init__(self, 
+                path:str=BASE_PATH, 
+                limit:int | None=limit, 
+                lsr:int=low_sampling_rate, 
+                hsr:int=high_sampling_rate, 
+                trunc:bool=True, 
+                file_list:list[str]=None)->None:
         super().__init__()
         
         if file_list is None:
-            self.files = get_leaf_files(path=path, ender=('.mp4', '.wav', '.flac'))
+            _,self.files = get_leaf_files(path=path, ender=('.mp4', '.wav', '.flac'))
             numpy.random.shuffle(self.files)
             kk = int(min(limit,len(self.files))) if limit is not None else len(self.files)
             self.files = self.files[:kk]
@@ -56,7 +62,6 @@ tr_len = int(0.9 * len(dataset))
 val_len = len(dataset) - tr_len
 tr_set, val_set = random_split(dataset, [tr_len, val_len], generator=generator)
 
-batch_size = 32
 tr_loader = DataLoader(tr_set, batch_size=batch_size, shuffle=True, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4)
 val_loader = DataLoader(val_set, batch_size=batch_size, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4)
 

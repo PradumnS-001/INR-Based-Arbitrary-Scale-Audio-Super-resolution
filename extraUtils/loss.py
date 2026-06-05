@@ -2,34 +2,42 @@ import torch
 from torch import nn
 import torch.nn.functional as F 
 
-class MultiScaleSpectralLoss(nn.Module):
-    """
-    Implements the Multi-resolution STFT loss.
-    Consists of Spectral Convergence (L2) and Log STFT Magnitude (L1) losses.
-    """
+class WaveLoss(nn.Module):
+    
     def __init__(self, n_ffts=[2048, 512]):
         super().__init__()
         self.n_ffts = n_ffts
 
-    def forward(self, x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-        x_hat = x_hat.squeeze(1)
+    def forward(self, x_hat: torch.Tensor, x: torch.Tensor)->tuple[torch.Tensor]:
         x = x.squeeze(1)
+        mssl_loss = 0
+        var_loss = 0
         
-        total_loss = 0
         for n in self.n_ffts:
+            
             hop = n // 4
             window = torch.hann_window(n, device=x.device)
             
-            s_hat = torch.stft(x_hat, n, hop_length=hop, window=window, return_complex=True).abs()
-            s = torch.stft(x, n, hop_length=hop, window=window, return_complex=True).abs()
+            s_hat = torch.stft(x_hat, n, hop_length=hop, window=window, return_complex=True)
+            s = torch.stft(x, n, hop_length=hop, window=window, return_complex=True)
             
-            sc_loss = torch.norm(s - s_hat, p="fro") / torch.norm(s, p="fro").clamp(min=1e-7)
+            s_abs = s.abs()
+            s_hat_abs = s_hat.abs()
             
-            mag_loss = F.l1_loss(torch.log(s_hat + 1e-5), torch.log(s + 1e-5))
+            sc_loss = torch.norm(s_abs - s_hat_abs, p="fro") / torch.norm(s_abs, p="fro").clamp(min=1e-7)
             
-            total_loss += (sc_loss + mag_loss)
+            mag_loss = F.l1_loss(torch.log(s_hat_abs + 1e-5), torch.log(s_abs + 1e-5))
             
-        return total_loss
+            mssl_loss += (sc_loss + mag_loss)
+            pad_amount = n // 2
+            x_padded = F.pad(x, (pad_amount, pad_amount), mode='reflect')
+            x_hat_padded = F.pad(x_hat, (pad_amount, pad_amount), mode='reflect')
+            
+            folded = x_padded.unfold(dimension=-1, size=n, step=hop)
+            folded_hat = x_hat_padded.unfold(dimension=-1, size=n, step=hop)
+            var_loss += F.mse_loss(folded_hat.var(-1), folded.var(-1))
+            
+        return mssl_loss, var_loss
     
 def log_spectral_distance(y_hat:torch.Tensor, y:torch.Tensor)->torch.Tensor:
     """
@@ -93,3 +101,6 @@ def balance_grad_norm(
         torch.nn.utils.clip_grad_norm_(parameters=model.parameters(), max_norm=norms)
         
     return sum([float(i.item() * w) for i, w in zip(losses, weights)])
+
+def gamma_loss(x:torch.Tensor):
+    return F.relu(0.1-x).mean()
