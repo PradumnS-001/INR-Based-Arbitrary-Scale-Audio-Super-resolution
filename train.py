@@ -8,22 +8,27 @@ import os
 
 from data import tr_loader, val_loader
 from configs import *
-from models import LISA
-from extraUtils.loss import WaveLoss, log_spectral_distance
+from models import ImprovedLISA
+from extraUtils.loss import WaveLoss, log_spectral_distance, ModelEMA
 from torchmetrics.audio import SignalNoiseRatio
 
 def main():
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(device)
+    supported = torch.cuda.is_bf16_supported()
+    print(supported)
+    cast_type = torch.bfloat16 if supported else torch.float16
     torch.backends.cudnn.benchmark = False
 
-    mssl = WaveLoss()
+    waveloss = WaveLoss().to(device)
     snr_metric = SignalNoiseRatio().to(device)
 
-    model = LISA().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    model =ImprovedLISA().to(device)
+    ema = ModelEMA(model=model)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wdc)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
+    scalar = torch.amp.GradScaler(device=device)
     
     best_lsd = float('inf')
     best_snr = -1*float('inf')
@@ -33,30 +38,49 @@ def main():
         model.train()
         epoch_loss = 0
         pbar = tqdm(tr_loader, desc=f"Epoch {epoch}")
+        optimizer.zero_grad(set_to_none=True)
         
-        for lr_wav, hr_wav in pbar:
+        for i, (lr_wav, hr_wav) in enumerate(pbar):
             
-            lr_wav:torch.Tensor = lr_wav.to(device)
+            lr_wav:torch.Tensor = lr_wav.to(device, non_blocking=True)
             scale = np.random.randint(50, int(50*high_sampling_rate/low_sampling_rate + 1)) / 50
             hsr_new = int(low_sampling_rate * scale)
-            with torch.no_grad(): hr_wav = resample(hr_wav, high_sampling_rate, hsr_new)
+            with torch.no_grad(): 
+                hr_wav = resample(hr_wav, high_sampling_rate, hsr_new)
+                lr_wave_base = F.interpolate(lr_wav, size=hsr_new, mode='linear', align_corners=True)
             
-            hr_wav:torch.Tensor = hr_wav.to(device)
-            optimizer.zero_grad(set_to_none=True)
+            hr_wav:torch.Tensor = hr_wav.to(device, non_blocking=True)
             
-            pred = model(lr_wav, scale=scale).squeeze(1)
-            min_len = min(pred.shape[-1],hr_wav.shape[-1])
-            pred, hr_wav = pred[...,:min_len], hr_wav[...,:min_len]
+            with torch.autocast(device_type=device, dtype=cast_type):
+                pred,gamma_loss = model(lr_wav, scale=scale)
+                min_len = min(pred.shape[-1],hr_wav.shape[-1])
+                pred, hr_wav = pred[...,:min_len], hr_wav[...,:min_len]
+                lr_wave_base = lr_wave_base[...,:min_len]
+                pred += lr_wave_base
+                
+                wl = waveloss(pred, hr_wav)
+                l1_penalty = F.l1_loss(pred, hr_wav)
+                loss:torch.Tensor = mssl_wt * wl[0] + l1_wt * l1_penalty + var_wt * wl[1] + g_wt * gamma_loss
+                loss = loss / update_step
+                
+                print((mssl_wt *wl[0].item()) / (l1_wt *l1_penalty.item()))
+                print((var_wt *wl[1].item()) / (l1_wt *l1_penalty.item()))
             
-            waveloss = mssl(pred, hr_wav)
-            loss:torch.Tensor = mssl_wt * waveloss[0] + l1_wt * F.l1_loss(pred, hr_wav)
+            if supported : loss.backward()
+            else : scalar.scale(loss).backward()
             
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
-            optimizer.step()
+            epoch_loss += loss.item() * update_step
+            pbar.set_postfix({"loss": loss.item() * update_step})
             
-            epoch_loss += loss.item()
-            pbar.set_postfix({"loss": loss.item()})
+            if (i + 1) % update_step == 0 or (i + 1) == len(tr_loader):
+                if not supported: scalar.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
+                if supported: optimizer.step()
+                else:
+                    scalar.step(optimizer)
+                    scalar.update()
+                ema.update(model)
+                optimizer.zero_grad(set_to_none=True)
             
         gc.collect()
         torch.cuda.empty_cache()
@@ -67,16 +91,23 @@ def main():
         snr_metric.reset()
         avg_lsd = 0
         with torch.no_grad():
+            
+            active_params = {n: p.data.clone() for n, p in model.named_parameters()}
+            ema.apply_shadow(model)
+            
             for lr_wav, hr_wav in val_loader:
                 lr_wav, hr_wav = lr_wav.to(device), hr_wav.to(device)
                 
                 scale = val_scale
                 hsr_new = int(low_sampling_rate * scale)
                 hr_wav = resample(hr_wav, high_sampling_rate, hsr_new)
+                lr_wave_base = F.interpolate(lr_wav, size=hsr_new, mode='linear', align_corners=True)
                 
-                pred = model(lr_wav, scale=scale)
+                pred,_ = model(lr_wav, scale=scale)
                 min_len = min(pred.shape[-1],hr_wav.shape[-1])
                 pred, hr_wav = pred[...,:min_len], hr_wav[...,:min_len]
+                lr_wave_base = lr_wave_base[...,:min_len]
+                pred += lr_wave_base
                 
                 snr_metric(pred, hr_wav)
                 avg_lsd += log_spectral_distance(pred, hr_wav).item()
@@ -106,9 +137,9 @@ def main():
                 'snr': best_snr
             }, os.path.join('models',"lisa_best_model_snr.pt"))
             print(f"--> Best model saved with SNR: {best_snr:.4f}")
+        for n, p in model.named_parameters(): p.data.copy_(active_params[n])
+        del active_params
         scheduler.step()
-        if epoch % 10 == 0:
-            torch.save(model.state_dict(), os.path.join('models',f"lisa_checkpoint_epoch_{epoch}.pt"))
         
 if __name__ == "__main__":
     main()

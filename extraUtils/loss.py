@@ -10,6 +10,7 @@ class WaveLoss(nn.Module):
 
     def forward(self, x_hat: torch.Tensor, x: torch.Tensor)->tuple[torch.Tensor]:
         x = x.squeeze(1)
+        x_hat = x_hat.squeeze(1)
         mssl_loss = 0
         var_loss = 0
         
@@ -24,7 +25,8 @@ class WaveLoss(nn.Module):
             s_abs = s.abs()
             s_hat_abs = s_hat.abs()
             
-            sc_loss = torch.norm(s_abs - s_hat_abs, p="fro") / torch.norm(s_abs, p="fro").clamp(min=1e-7)
+            diff_sq = (s_abs - s_hat_abs).pow(2).sum()
+            sc_loss = torch.sqrt(diff_sq + 1e-7) / torch.norm(s_abs, p="fro").clamp(min=1e-7)
             
             mag_loss = F.l1_loss(torch.log(s_hat_abs + 1e-5), torch.log(s_abs + 1e-5))
             
@@ -103,4 +105,25 @@ def balance_grad_norm(
     return sum([float(i.item() * w) for i, w in zip(losses, weights)])
 
 def gamma_loss(x:torch.Tensor):
-    return F.relu(0.1-x).mean()
+    return F.relu(0.01-x).mean()
+
+class ModelEMA:
+    def __init__(self, model, decay=0.999):
+        self.decay = decay
+        self.shadow = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone().detach()
+
+    @torch.no_grad()
+    def update(self, model):
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                new_average = (self.shadow[name] * self.decay) + (param.data * (1.0 - self.decay))
+                self.shadow[name].copy_(new_average)
+
+    @torch.no_grad()
+    def apply_shadow(self, model):
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                param.data.copy_(self.shadow[name])

@@ -7,62 +7,28 @@ from extraUtils.loss import gamma_loss
 
 class AffineTransformation(nn.Module):
     
-    def __init__(self, in_feats = 128, out_feats = 128):
+    def __init__(self, in_feats = mdim, out_feats = mdim):
         super().__init__()
         
-        self.fc = nn.Linear(in_feats, out_feats)
-        self.A = nn.Linear(128,out_feats)
-        self.B = nn.Linear(128,out_feats)
-        self.C = nn.Sequential(
-            nn.Linear(128,out_feats),
-            nn.Sigmoid()
-        )
+        self.fc = nn.Linear(in_feats, out_feats, bias=False)
+        self.actv = getActivation(actfd)
         
     def forward(self,
-                pre_alpha:torch.Tensor,
-                pre_beta:torch.Tensor,
-                pre_gamma:torch.Tensor, 
+                alpha:torch.Tensor,
+                beta:torch.Tensor,
+                gamma:torch.Tensor, 
                 canvas:torch.Tensor):
         
-        alpha = self.A(pre_alpha)
-        beta = self.B(pre_beta)
-        gamma = self.C(pre_gamma)
-        canvas = self.fc(canvas)
-        noise = torch.randn_like(gamma)
-        canvas = torch.sqrt(1-gamma) * canvas + torch.sqrt(gamma) * noise
-        return alpha * canvas + beta, gamma_loss(gamma)
-    
-class StyleDecoder(nn.Module):
-    
-    def __init__(self, in_dim, out_dim):
-        super().__init__()
+        x = canvas * alpha
+        x = self.fc(x)
+        weight_sq = self.fc.weight.pow(2)
+        alpha_sq = alpha.pow(2)
+        demod = torch.rsqrt(F.linear(alpha_sq, weight_sq) + 1e-8)
+        canvas = x * demod
         
-        self.fc1 = AffineTransformation(in_dim,128)
-        self.act1 = getActivation(act='gelu')
-        self.fc2 = AffineTransformation(128,128)
-        self.act2 = getActivation(act='gelu')
-        self.fc3 = AffineTransformation(128,128)
-        self.act3 = getActivation(act='gelu')
-        self.fc4 = AffineTransformation(128,128)
-        self.act4 = getActivation(act='gelu')
-        self.fc5 = nn.Linear(128,out_dim)
-        
-    def forward(self,
-                pre_alpha:torch.Tensor,
-                pre_beta:torch.Tensor,
-                pre_gamma:torch.Tensor, 
-                canvas:torch.Tensor):
-        
-        o1,gl1 = self.fc1(pre_alpha, pre_beta, pre_gamma, canvas)
-        o1 = self.act1(o1)
-        o1,gl2 = self.fc1(pre_alpha, pre_beta, pre_gamma, canvas)
-        o1 = self.act1(o1)
-        o1,gl3 = self.fc1(pre_alpha, pre_beta, pre_gamma, canvas)
-        o1 = self.act1(o1)
-        o1,gl4 = self.fc1(pre_alpha, pre_beta, pre_gamma, canvas)
-        o1 = self.act1(o1)
-        o1 = self.fc5(o1)
-        return o1, gl1+gl2+gl3+gl4
+        noise = torch.randn_like(canvas)
+        canvas = torch.sqrt(1 - gamma + 1e-12) * canvas + torch.sqrt(gamma + 1e-12) * noise
+        return self.actv(canvas + beta)
     
 class ImprovedLISA(nn.Module):
     def __init__(self):
@@ -78,19 +44,24 @@ class ImprovedLISA(nn.Module):
             nn.Conv1d(64, 32, kernel_size=1)
         )
         
-        self.decoder = StyleDecoder(in_dim=num_bands*2+1,out_dim=1)
-        
         self.style_mlp = nn.Sequential(
-            nn.Linear(32*3+1,128),
+            nn.Linear(32*3+1,mdim),
             getActivation(act=actfs),
-            nn.Linear(128,128),
+            nn.Linear(mdim,mdim),
             getActivation(act=actfs),
-            nn.Linear(128,128),
-            getActivation(act='gelu')
+            nn.Linear(mdim,mdim),
+            getActivation(act=actfs)
         )
-        self.fch1 = nn.Linear(128,128)
-        self.fch2 = nn.Linear(128,128)
-        self.fch3 = nn.Linear(128,128)
+        self.fch1 = nn.Linear(mdim,mdim)
+        self.fch2 = nn.Linear(mdim,mdim)
+        self.fch3 = nn.Linear(mdim,mdim)
+        
+        self.alpha_transforms = nn.ModuleList([nn.Linear(mdim, num_bands*2+1)] + [nn.Linear(mdim, mdim) for _ in range(3)])
+        self.beta_transforms = nn.ModuleList([nn.Linear(mdim,mdim) for _ in range(4)])
+        self.gamma_transforms = nn.ModuleList([nn.Sequential(nn.Linear(mdim,mdim),nn.Sigmoid()) for _ in range(4)])
+        self.affine_transformations = nn.ModuleList([AffineTransformation(num_bands*2+1, mdim)] + [AffineTransformation(mdim, mdim) for _ in range(3)])
+        
+        self.output = nn.Linear(mdim, 1)
 
     def forward(self, x_lr:torch.Tensor, scale:int | float): 
         
@@ -123,19 +94,26 @@ class ImprovedLISA(nn.Module):
         z_next_base = z_pad[:, :, 2:]
         z_triplet_base = torch.cat([z_prev_base, z_curr_base, z_next_base], dim=1).transpose(1, 2)
 
-        scale_tensor = torch.full((B, L_hr, 1), float(scale), device=x_lr.device)
+        scale_tensor = torch.ones(B,z_triplet_base.shape[1],1, device=x_lr.device,dtype=torch.float32) * torch.tensor(scale, device=x_lr.device,dtype=torch.float32)
         feat = torch.cat([scale_tensor, z_triplet_base], dim=-1)
         
         base = self.style_mlp(feat)
         pre_alpha_base = self.fch1(base)
         pre_beta_base = self.fch2(base)
         pre_gamma_base = self.fch3(base)
-        idx_expanded = idx_i.unsqueeze(-1).expand(-1, -1, 128)
         
-        pre_alpha = torch.gather(pre_alpha_base, 1, idx_expanded)
-        pre_beta  = torch.gather(pre_beta_base, 1, idx_expanded)
-        pre_gamma = torch.gather(pre_gamma_base, 1, idx_expanded)
+        alphas = [self.alpha_transforms[i](pre_alpha_base) for i in range(4)]
+        betas = [self.beta_transforms[i](pre_beta_base) for i in range(4)]
+        gammas = [self.gamma_transforms[i](pre_gamma_base) for i in range(4)]
         
-        out,gloss = self.decoder(pre_alpha,pre_beta,pre_gamma,pe)
+        idx_expanded = idx_i.unsqueeze(-1).expand(-1, -1, mdim)
         
-        return out.mT.contiguous(), gloss
+        gloss = 0
+        for i in range(4):
+            gloss += gamma_loss(gammas[i])*0.25
+            alpha = torch.gather(alphas[i], 1, idx_expanded[:,:,:(alphas[i].shape)[-1]])
+            beta = torch.gather(betas[i], 1, idx_expanded)
+            gamma = torch.gather(gammas[i], 1, idx_expanded).clamp(min=1e-8, max=1.0-1e-8)
+            pe = self.affine_transformations[i](alpha,beta,gamma,pe)
+        
+        return self.output(pe).mT.contiguous(), gloss
