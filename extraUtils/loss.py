@@ -105,7 +105,7 @@ def balance_grad_norm(
     return sum([float(i.item() * w) for i, w in zip(losses, weights)])
 
 def gamma_loss(x:torch.Tensor):
-    return F.relu(0.01-x).mean()
+    return F.relu(0.1-x).mean()
 
 class ModelEMA:
     def __init__(self, model, decay=0.999):

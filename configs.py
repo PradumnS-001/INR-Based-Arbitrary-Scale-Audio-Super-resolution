@@ -1,3 +1,5 @@
+import numpy as np
+
 BASE_PATH = 'Data/VCTKCorpus'
 seed = 67
 actfe = actfd = actfs = 'relu'
@@ -17,12 +19,12 @@ step_size = 12
 gamma = 0.5
 wdc = 1e-4
 
-max_norm = 0.1
-mssl_wt = 1
-l1_wt = 55
-var_wt = 300
-g_wt = 10
+max_norm = 1
+l1_wt = 1
+var_wt = 7.50
+g_wt = 0.50
+mssl_wt = 0.01
 
-omega = 50
-num_bands = 8
-mdim = 256
+omega = np.pi
+num_bands = 2
+mdim = 128

@@ -52,7 +52,7 @@ def main():
                 pred += lr_wave_base_c
                 
                 wl = waveloss(pred, hr_wav_c)
-                l1_penalty = F.l1_loss(pred, hr_wav)
+                l1_penalty = F.l1_loss(pred, hr_wav_c)
                 loss:torch.Tensor = mssl_wt * wl[0] + l1_wt * l1_penalty + var_wt * wl[1] + g_wt * gamma_loss
             
             loss.backward()

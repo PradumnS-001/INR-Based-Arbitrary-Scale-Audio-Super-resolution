@@ -1,6 +1,7 @@
 import torch
 from torch.nn import functional as F
 from torchaudio.functional import resample
+from torchmetrics.audio import SignalNoiseRatio
 from tqdm import tqdm
 import numpy as np
 import gc
@@ -10,7 +11,6 @@ from data import tr_loader, val_loader
 from configs import *
 from models import ImprovedLISA
 from extraUtils.loss import WaveLoss, log_spectral_distance, ModelEMA
-from torchmetrics.audio import SignalNoiseRatio
 
 def main():
 
@@ -36,7 +36,6 @@ def main():
     for epoch in range(epochs):
         
         model.train()
-        epoch_loss = 0
         pbar = tqdm(tr_loader, desc=f"Epoch {epoch}")
         optimizer.zero_grad(set_to_none=True)
         
@@ -62,16 +61,11 @@ def main():
                 l1_penalty = F.l1_loss(pred, hr_wav)
                 loss:torch.Tensor = mssl_wt * wl[0] + l1_wt * l1_penalty + var_wt * wl[1] + g_wt * gamma_loss
                 loss = loss / update_step
-                
-                print((mssl_wt *wl[0].item()) / (l1_wt *l1_penalty.item()))
-                print((var_wt *wl[1].item()) / (l1_wt *l1_penalty.item()))
             
             if supported : loss.backward()
             else : scalar.scale(loss).backward()
             
-            epoch_loss += loss.item() * update_step
             pbar.set_postfix({"loss": loss.item() * update_step})
-            
             if (i + 1) % update_step == 0 or (i + 1) == len(tr_loader):
                 if not supported: scalar.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
@@ -84,8 +78,6 @@ def main():
             
         gc.collect()
         torch.cuda.empty_cache()
-        
-        avg_train_loss = epoch_loss / len(tr_loader)
         
         model.eval()
         snr_metric.reset()
@@ -115,7 +107,7 @@ def main():
         current_val_snr = snr_metric.compute().item()
         current_val_lsd = avg_lsd / len(val_loader)
         
-        print(f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Val SNR: {current_val_snr:.2f} | Val LSD: {current_val_lsd:.4f}")
+        print(f"Epoch {epoch} | Val SNR: {current_val_snr:.2f} | Val LSD: {current_val_lsd:.4f}")
         
         if current_val_lsd <= best_lsd:
             best_lsd = current_val_lsd

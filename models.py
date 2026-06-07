@@ -19,15 +19,14 @@ class AffineTransformation(nn.Module):
                 gamma:torch.Tensor, 
                 canvas:torch.Tensor):
         
-        x = canvas * alpha
-        x = self.fc(x)
+        x = self.fc(canvas * alpha)
         weight_sq = self.fc.weight.pow(2)
         alpha_sq = alpha.pow(2)
         demod = torch.rsqrt(F.linear(alpha_sq, weight_sq) + 1e-8)
         canvas = x * demod
         
         noise = torch.randn_like(canvas)
-        canvas = torch.sqrt(1 - gamma + 1e-12) * canvas + torch.sqrt(gamma + 1e-12) * noise
+        canvas += gamma**2 * noise
         return self.actv(canvas + beta)
     
 class ImprovedLISA(nn.Module):
@@ -62,6 +61,10 @@ class ImprovedLISA(nn.Module):
         self.affine_transformations = nn.ModuleList([AffineTransformation(num_bands*2+1, mdim)] + [AffineTransformation(mdim, mdim) for _ in range(3)])
         
         self.output = nn.Linear(mdim, 1)
+        for m in self.gamma_transforms:
+            nn.init.constant_(m[0].bias, -3.0)
+        for m in self.alpha_transforms:
+            nn.init.ones_(m.bias)
 
     def forward(self, x_lr:torch.Tensor, scale:int | float): 
         
@@ -113,7 +116,7 @@ class ImprovedLISA(nn.Module):
             gloss += gamma_loss(gammas[i])*0.25
             alpha = torch.gather(alphas[i], 1, idx_expanded[:,:,:(alphas[i].shape)[-1]])
             beta = torch.gather(betas[i], 1, idx_expanded)
-            gamma = torch.gather(gammas[i], 1, idx_expanded).clamp(min=1e-8, max=1.0-1e-8)
+            gamma = torch.gather(gammas[i], 1, idx_expanded)
             pe = self.affine_transformations[i](alpha,beta,gamma,pe)
         
         return self.output(pe).mT.contiguous(), gloss
