@@ -12,6 +12,7 @@ from configs import *
 from models import ImprovedLISA
 from extraUtils.loss import WaveLoss, log_spectral_distance, compute_audio_ssim, ganin_scheduler
 from extraUtils.layers import ModelEMA
+from extraUtils.misc import count_params
 
 def calc_loss(
     predA:torch.Tensor,
@@ -49,6 +50,7 @@ def main():
     torch.backends.cudnn.benchmark = False
 
     model = ImprovedLISA().to(device)
+    count_params(model=model)
     ema = ModelEMA(model=model)
     decay_params = []
     no_decay_params = []

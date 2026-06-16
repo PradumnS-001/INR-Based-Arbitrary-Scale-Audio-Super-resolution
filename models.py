@@ -22,7 +22,8 @@ class AffineTransformation(nn.Module):
                 alpha:torch.Tensor,
                 beta:torch.Tensor,
                 gamma:torch.Tensor, 
-                canvas:torch.Tensor):
+                canvas:torch.Tensor,
+                stochastic:bool = True):
         
         skip = canvas
         B, L, _ = canvas.shape
@@ -32,7 +33,7 @@ class AffineTransformation(nn.Module):
         demod = torch.rsqrt(F.linear(alpha_sq, weight_sq) + 1e-5)
         canvas = x * demod
         
-        if self.noisify and self.training:
+        if self.noisify and stochastic:
             noise = torch.randn(B,L,1, device=canvas.device)
             canvas = canvas + gamma * self.gamma_vec * noise
         canvas = self.fc2(self.actv(canvas + beta))
@@ -43,8 +44,8 @@ class ImprovedLISA(nn.Module):
     def __init__(self):
         super().__init__()
         
-        self.macro_encoder = SEANetEncoder(n_filters=32, dimension=mdim, ratios=[2,2,2,2], lstm=0)
-        self.macro_proj = nn.Conv1d(mdim, int(100/128*mdim), kernel_size=1)
+        self.macro_encoder = SEANetEncoder(n_filters=32, dimension=mdim, ratios=[4,4], lstm=0)
+        self.macro_proj = nn.Conv1d(mdim, int(0.75*mdim), kernel_size=1)
         
         self.micro_encoder = nn.Sequential(
             nn.Conv1d(1, 16, kernel_size=7, padding=3),
@@ -53,7 +54,7 @@ class ImprovedLISA(nn.Module):
             getActivation(act=actfe),
             nn.Conv1d(32, 64, kernel_size=3, padding=1),
             getActivation(act=actfe),
-            nn.Conv1d(64, mdim - int(100/128*mdim), kernel_size=1)
+            nn.Conv1d(64, mdim - int(0.75*mdim), kernel_size=1)
         )
         
         self.param_trunk = nn.Sequential(
@@ -110,9 +111,10 @@ class ImprovedLISA(nn.Module):
         nn.init.constant_(self.alpha_branch[-1].bias, 1)
         nn.init.constant_(self.beta_branch[-1].bias, 0)
 
-    def forward(self, x_lr, scale):
+    def forward(self, x_lr, scale, infer_stoc:bool=False):
         B, _, L_lr = x_lr.shape
         L_hr = int(L_lr * scale)
+        gen_noise = infer_stoc or self.training
         
         macro_feat = self.macro_proj(self.macro_encoder(x_lr))
         macro_feat = F.interpolate(macro_feat, size=L_lr, mode='linear', align_corners=False)
@@ -132,6 +134,8 @@ class ImprovedLISA(nn.Module):
         alphas = self.alpha_branch(base_params)
         betas = self.beta_branch(base_params)
         gammas = self.gamma_branch(base_params)
+        
+        if gen_noise and not self.training: gammas *= temperature
         
         t_hr = torch.arange(L_hr, device=x_lr.device).float() / scale
         t_hr = t_hr.unsqueeze(0).repeat(B, 1)
@@ -162,12 +166,12 @@ class ImprovedLISA(nn.Module):
         gathered_betas = torch.gather(betas.view(B, L_lr, num_blocks, mdim), 1, idx_alpha_beta)
         gathered_gammas = torch.gather(gammas.view(B, L_lr, num_blocks, 1), 1, idx_gamma)
         
-        for i in range(min(noisy_start,num_blocks) if self.training else num_blocks):
+        for i in range(min(noisy_start,num_blocks) if gen_noise else num_blocks):
             alpha = gathered_alphas[:, :, i, :]
             beta = gathered_betas[:, :, i, :]
-            canvas = self.affine_transformations[i](alpha, beta, 0, canvas)
+            canvas = self.affine_transformations[i](alpha, beta, 0, canvas, False)
         
-        if noisy_start < num_blocks and self.training:
+        if noisy_start < num_blocks and gen_noise:
             
             dropA,dropB = 1,1
             pA,pB = canvas,canvas.clone()
