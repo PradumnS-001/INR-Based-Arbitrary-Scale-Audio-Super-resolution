@@ -2,16 +2,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from configs import *
-from extraUtils.activations import getActivation
-from extraUtils.loss import gamma_loss
+from extraUtils.layers import getActivation, WeightNormLinear
+from encodec.modules import SEANetEncoder
 
 class AffineTransformation(nn.Module):
     
-    def __init__(self, in_feats = mdim, out_feats = mdim):
+    def __init__(self, in_feats = mdim, out_feats = mdim, noisify:bool=True):
         super().__init__()
         
-        self.fc = nn.Linear(in_feats, out_feats, bias=False)
+        self.fc1 = nn.Linear(in_feats, out_feats)
+        self.fc2 = WeightNormLinear(out_feats,out_feats)
         self.actv = getActivation(actfd)
+        self.scalar = nn.Parameter(torch.tensor(0.70710678).view(1, 1, 1))
+        if noisify:
+            self.gamma_vec = nn.Parameter(torch.zeros(1,1,out_feats))
+        self.noisify = noisify
         
     def forward(self,
                 alpha:torch.Tensor,
@@ -19,104 +24,169 @@ class AffineTransformation(nn.Module):
                 gamma:torch.Tensor, 
                 canvas:torch.Tensor):
         
-        x = self.fc(canvas * alpha)
-        weight_sq = self.fc.weight.pow(2)
-        alpha_sq = alpha.pow(2)
-        demod = torch.rsqrt(F.linear(alpha_sq, weight_sq) + 1e-8)
+        skip = canvas
+        B, L, _ = canvas.shape
+        x = self.fc1(canvas * alpha)
+        weight_sq = self.fc1.weight.pow(2).float()
+        alpha_sq = alpha.pow(2).float()
+        demod = torch.rsqrt(F.linear(alpha_sq, weight_sq) + 1e-5)
         canvas = x * demod
         
-        noise = torch.randn_like(canvas)
-        canvas += gamma**2 * noise
-        return self.actv(canvas + beta)
+        if self.noisify and self.training:
+            noise = torch.randn(B,L,1, device=canvas.device)
+            canvas = canvas + gamma * self.gamma_vec * noise
+        canvas = self.fc2(self.actv(canvas + beta))
+        
+        return torch.tensor(0.70710678, device=canvas.device) * skip + self.scalar * canvas
     
 class ImprovedLISA(nn.Module):
     def __init__(self):
         super().__init__()
         
-        self.encoder = nn.Sequential(
+        self.macro_encoder = SEANetEncoder(n_filters=32, dimension=mdim, ratios=[2,2,2,2], lstm=0)
+        self.macro_proj = nn.Conv1d(mdim, int(100/128*mdim), kernel_size=1)
+        
+        self.micro_encoder = nn.Sequential(
             nn.Conv1d(1, 16, kernel_size=7, padding=3),
             getActivation(act=actfe),
             nn.Conv1d(16, 32, kernel_size=3, padding=1),
             getActivation(act=actfe),
             nn.Conv1d(32, 64, kernel_size=3, padding=1),
             getActivation(act=actfe),
-            nn.Conv1d(64, 32, kernel_size=1)
+            nn.Conv1d(64, mdim - int(100/128*mdim), kernel_size=1)
         )
         
-        self.style_mlp = nn.Sequential(
-            nn.Linear(32*3+1,mdim),
+        self.param_trunk = nn.Sequential(
+            WeightNormLinear(mdim * 3 + 1, mdim),
             getActivation(act=actfs),
-            nn.Linear(mdim,mdim),
-            getActivation(act=actfs),
-            nn.Linear(mdim,mdim),
+            WeightNormLinear(mdim, mdim),
             getActivation(act=actfs)
         )
-        self.fch1 = nn.Linear(mdim,mdim)
-        self.fch2 = nn.Linear(mdim,mdim)
-        self.fch3 = nn.Linear(mdim,mdim)
         
-        self.alpha_transforms = nn.ModuleList([nn.Linear(mdim, num_bands*2+1)] + [nn.Linear(mdim, mdim) for _ in range(3)])
-        self.beta_transforms = nn.ModuleList([nn.Linear(mdim,mdim) for _ in range(4)])
-        self.gamma_transforms = nn.ModuleList([nn.Sequential(nn.Linear(mdim,mdim),nn.Sigmoid()) for _ in range(4)])
-        self.affine_transformations = nn.ModuleList([AffineTransformation(num_bands*2+1, mdim)] + [AffineTransformation(mdim, mdim) for _ in range(3)])
+        self.alpha_branch = nn.Sequential(
+            WeightNormLinear(mdim, mdim),
+            getActivation(act=actfs),
+            WeightNormLinear(mdim, mdim),
+            getActivation(act=actfs),
+            nn.Linear(mdim, num_blocks * mdim)
+        )
         
-        self.output = nn.Linear(mdim, 1)
-        for m in self.gamma_transforms:
-            nn.init.constant_(m[0].bias, -3.0)
-        for m in self.alpha_transforms:
-            nn.init.ones_(m.bias)
+        self.beta_branch = nn.Sequential(
+            WeightNormLinear(mdim, mdim),
+            getActivation(act=actfs),
+            WeightNormLinear(mdim, mdim),
+            getActivation(act=actfs),
+            nn.Linear(mdim, num_blocks * mdim)
+        )
+        
+        self.gamma_branch = nn.Sequential(
+            WeightNormLinear(mdim, mdim),
+            getActivation(act=actfs),
+            WeightNormLinear(mdim, mdim),
+            getActivation(act=actfs),
+            nn.Linear(mdim, num_blocks * 1),
+            nn.Sigmoid()
+        )
+        
+        k = (num_bands+1)*2 + mdim
+        self.input_projection = nn.Sequential(
+            nn.Linear((num_bands+1)*2, k//4),
+            getActivation(actfd),
+            nn.Linear(k//4,k//2),
+            getActivation(actfd),
+            nn.Linear(k//2,mdim)
+        )
+        self.affine_transformations = nn.ModuleList([
+            AffineTransformation(mdim, mdim, noisify=(i >= noisy_start))
+            for i in range(num_blocks)
+        ])
+        
+        self.output_block = nn.Sequential(
+            getActivation(act=actfd),
+            nn.Linear(mdim, 1)
+        )
+        
+        self.omega = nn.Parameter(torch.tensor(omega)) if is_omega_trainable else torch.tensor(omega)
+        nn.init.constant_(self.alpha_branch[-1].bias, 1)
+        nn.init.constant_(self.beta_branch[-1].bias, 0)
 
-    def forward(self, x_lr:torch.Tensor, scale:int | float): 
-        
+    def forward(self, x_lr, scale):
         B, _, L_lr = x_lr.shape
         L_hr = int(L_lr * scale)
         
-        z = self.encoder(x_lr)
+        macro_feat = self.macro_proj(self.macro_encoder(x_lr))
+        macro_feat = F.interpolate(macro_feat, size=L_lr, mode='linear', align_corners=False)
+        micro_feat = self.micro_encoder(x_lr)
+        
+        z = torch.cat([macro_feat, micro_feat], dim=1)
+        z_pad = F.pad(z, (1, 1), mode='replicate')
+        z_prev = z_pad[:, :, :-2]
+        z_curr = z_pad[:, :, 1:-1]
+        z_next = z_pad[:, :, 2:]
+        z_triplet = torch.cat([z_prev, z_curr, z_next], dim=1).transpose(1, 2)
+        
+        scale_tensor = torch.ones(B, L_lr, 1, device=x_lr.device, dtype=x_lr.dtype) * scale
+        feat = torch.cat([scale_tensor, z_triplet], dim=-1)
+        
+        base_params = self.param_trunk(feat)
+        alphas = self.alpha_branch(base_params)
+        betas = self.beta_branch(base_params)
+        gammas = self.gamma_branch(base_params)
         
         t_hr = torch.arange(L_hr, device=x_lr.device).float() / scale
         t_hr = t_hr.unsqueeze(0).repeat(B, 1)
         
-        if self.training:
+        if self.training and do_perturbation:
             eta = torch.randn_like(t_hr) * 0.4
             t_select = t_hr + eta
         else:
             t_select = t_hr
-        
+            
         idx_i = torch.round(t_select).long().clamp(0, L_lr - 1)
         t_rel = (t_hr - idx_i.float()).unsqueeze(-1)
         
-        freq_exps = torch.arange(num_bands, device=x_lr.device, dtype=torch.float32)
-        frequencies = omega * (2.0 ** freq_exps)
+        freq_exps = torch.arange(3, device=x_lr.device, dtype=torch.float32)
+        frequencies = self.omega * (2.0 ** freq_exps)
         frequencies = frequencies.view(1, 1, -1)
         t_scaled = t_rel * frequencies
         pe = torch.cat([torch.sin(t_scaled), torch.cos(t_scaled), t_rel], dim=-1)
         
-        z_pad = F.pad(z, (1, 1), mode='replicate')
-        z_prev_base = z_pad[:, :, :-2]
-        z_curr_base = z_pad[:, :, 1:-1]
-        z_next_base = z_pad[:, :, 2:]
-        z_triplet_base = torch.cat([z_prev_base, z_curr_base, z_next_base], dim=1).transpose(1, 2)
-
-        scale_tensor = torch.ones(B,z_triplet_base.shape[1],1, device=x_lr.device,dtype=torch.float32) * torch.tensor(scale, device=x_lr.device,dtype=torch.float32)
-        feat = torch.cat([scale_tensor, z_triplet_base], dim=-1)
+        scale_tensor_hr = torch.ones(B, L_hr, 1, device=x_lr.device, dtype=x_lr.dtype) * scale
+        canvas = torch.cat([pe, scale_tensor_hr], dim=-1)
+        canvas = self.input_projection(canvas)
         
-        base = self.style_mlp(feat)
-        pre_alpha_base = self.fch1(base)
-        pre_beta_base = self.fch2(base)
-        pre_gamma_base = self.fch3(base)
+        idx_alpha_beta = idx_i.view(B, L_hr, 1, 1).expand(-1, -1, num_blocks, mdim)
+        idx_gamma = idx_i.view(B, L_hr, 1, 1).expand(-1, -1, num_blocks, 1)
         
-        alphas = [self.alpha_transforms[i](pre_alpha_base) for i in range(4)]
-        betas = [self.beta_transforms[i](pre_beta_base) for i in range(4)]
-        gammas = [self.gamma_transforms[i](pre_gamma_base) for i in range(4)]
+        gathered_alphas = torch.gather(alphas.view(B, L_lr, num_blocks, mdim), 1, idx_alpha_beta)
+        gathered_betas = torch.gather(betas.view(B, L_lr, num_blocks, mdim), 1, idx_alpha_beta)
+        gathered_gammas = torch.gather(gammas.view(B, L_lr, num_blocks, 1), 1, idx_gamma)
         
-        idx_expanded = idx_i.unsqueeze(-1).expand(-1, -1, mdim)
+        for i in range(min(noisy_start,num_blocks) if self.training else num_blocks):
+            alpha = gathered_alphas[:, :, i, :]
+            beta = gathered_betas[:, :, i, :]
+            canvas = self.affine_transformations[i](alpha, beta, 0, canvas)
         
-        gloss = 0
-        for i in range(4):
-            gloss += gamma_loss(gammas[i])*0.25
-            alpha = torch.gather(alphas[i], 1, idx_expanded[:,:,:(alphas[i].shape)[-1]])
-            beta = torch.gather(betas[i], 1, idx_expanded)
-            gamma = torch.gather(gammas[i], 1, idx_expanded)
-            pe = self.affine_transformations[i](alpha,beta,gamma,pe)
+        if noisy_start < num_blocks and self.training:
+            
+            dropA,dropB = 1,1
+            pA,pB = canvas,canvas.clone()
+            for i in range(noisy_start,num_blocks):
+                
+                alpha = gathered_alphas[:, :, i, :]
+                beta = gathered_betas[:, :, i, :]
+                gamma = gathered_gammas[:, :, i, :]
+                
+                if self.training and dropA == 1 and dropB == 1:
+                    if torch.rand(1).item() < drop_prob: 
+                        dropA = 0
+                    elif torch.rand(1).item() < drop_prob: 
+                        dropB = 0
+                
+                pA = self.affine_transformations[i](alpha, beta, gamma*dropA, pA)
+                pB = self.affine_transformations[i](alpha, beta, gamma*dropB, pB)
+                
+            return self.output_block(pA).mT.contiguous(),self.output_block(pB).mT.contiguous()
         
-        return self.output(pe).mT.contiguous(), gloss
+        res = self.output_block(canvas).mT.contiguous()
+        return res, res.clone()

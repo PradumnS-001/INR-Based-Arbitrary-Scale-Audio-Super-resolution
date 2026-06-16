@@ -2,11 +2,11 @@ import torch
 from torch.utils.data import Dataset, random_split, DataLoader
 from torchaudio.functional import resample
 import soundfile as sf
-import numpy
+import numpy as np
 from extraUtils.misc import get_leaf_files
 from configs import *
 
-numpy.random.seed(seed)
+np.random.seed(seed)
 generator = torch.Generator().manual_seed(seed)
 
 class AudioCorpus(Dataset):
@@ -22,7 +22,7 @@ class AudioCorpus(Dataset):
         
         if file_list is None:
             _,self.files = get_leaf_files(path=path, ender=('.mp4', '.wav', '.flac'))
-            numpy.random.shuffle(self.files)
+            np.random.shuffle(self.files)
             kk = int(min(limit,len(self.files))) if limit is not None else len(self.files)
             self.files = self.files[:kk]
         else:
@@ -62,7 +62,7 @@ tr_len = int(0.9 * len(dataset))
 val_len = len(dataset) - tr_len
 tr_set, val_set = random_split(dataset, [tr_len, val_len], generator=generator)
 
-tr_loader = DataLoader(tr_set, batch_size=batch_size, shuffle=True, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4)
+tr_loader = DataLoader(tr_set, batch_size=batch_size, shuffle=True, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4,drop_last=True)
 val_loader = DataLoader(val_set, batch_size=batch_size, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4)
 
 val12_indices = val_set.indices[:12]

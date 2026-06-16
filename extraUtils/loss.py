@@ -1,10 +1,14 @@
 import torch
 from torch import nn
-import torch.nn.functional as F 
+import torch.nn.functional as F
+from torchmetrics.functional.image import structural_similarity_index_measure as ssim_func
+
+def ganin_scheduler(epoch):
+    return torch.tanh(torch.tensor(epoch/2)).item()
 
 class WaveLoss(nn.Module):
     
-    def __init__(self, n_ffts=[2048, 512]):
+    def __init__(self, n_ffts=[2048, 512, 128]):
         super().__init__()
         self.n_ffts = n_ffts
 
@@ -12,34 +16,22 @@ class WaveLoss(nn.Module):
         x = x.squeeze(1)
         x_hat = x_hat.squeeze(1)
         mssl_loss = 0
-        var_loss = 0
         
         for n in self.n_ffts:
             
             hop = n // 4
             window = torch.hann_window(n, device=x.device)
             
-            s_hat = torch.stft(x_hat, n, hop_length=hop, window=window, return_complex=True)
-            s = torch.stft(x, n, hop_length=hop, window=window, return_complex=True)
-            
-            s_abs = s.abs()
-            s_hat_abs = s_hat.abs()
+            s_hat_abs = torch.stft(x_hat.float(), n, hop_length=hop, window=window.float(), return_complex=True).abs()
+            s_abs = torch.stft(x.float(), n, hop_length=hop, window=window.float(), return_complex=True).abs()
             
             diff_sq = (s_abs - s_hat_abs).pow(2).sum()
-            sc_loss = torch.sqrt(diff_sq + 1e-7) / torch.norm(s_abs, p="fro").clamp(min=1e-7)
+            sc_loss = torch.sqrt(diff_sq + 1e-5) / torch.norm(s_abs, p="fro").clamp(min=1e-5)
             
             mag_loss = F.l1_loss(torch.log(s_hat_abs + 1e-5), torch.log(s_abs + 1e-5))
-            
             mssl_loss += (sc_loss + mag_loss)
-            pad_amount = n // 2
-            x_padded = F.pad(x, (pad_amount, pad_amount), mode='reflect')
-            x_hat_padded = F.pad(x_hat, (pad_amount, pad_amount), mode='reflect')
-            
-            folded = x_padded.unfold(dimension=-1, size=n, step=hop)
-            folded_hat = x_hat_padded.unfold(dimension=-1, size=n, step=hop)
-            var_loss += F.mse_loss(folded_hat.var(-1), folded.var(-1))
-            
-        return mssl_loss, var_loss
+        
+        return mssl_loss
     
 def log_spectral_distance(y_hat:torch.Tensor, y:torch.Tensor)->torch.Tensor:
     """
@@ -54,6 +46,37 @@ def log_spectral_distance(y_hat:torch.Tensor, y:torch.Tensor)->torch.Tensor:
     
     dist = torch.sqrt(torch.mean((log_s - log_s_hat)**2, dim=-2))
     return torch.mean(dist)
+            
+def compute_audio_ssim(waveform_pred: torch.Tensor, waveform_target: torch.Tensor, sample_rate=None):
+    """
+    Computes SSIM directly on the log-power STFT to perfectly match the LSD metric space.
+    """
+    n_fft = 512
+    hop = n_fft // 4  # Standard overlap
+    window = torch.hann_window(n_fft, device=waveform_pred.device)
+    
+    # 1. Compute exact same Power STFT as your LSD function
+    s_p = torch.stft(waveform_pred.squeeze(1), n_fft, hop_length=hop, return_complex=True, window=window).abs().pow(2)
+    s_t = torch.stft(waveform_target.squeeze(1), n_fft, hop_length=hop, return_complex=True, window=window).abs().pow(2)
+    
+    # 2. Log compression (matches LSD +1e-5 epsilon)
+    log_s_p = torch.log(s_p + 1e-5)
+    log_s_t = torch.log(s_t + 1e-5)
+    
+    # 3. Strict Normalization to [0, 1] bounded by the target's min/max
+    min_v, max_v = log_s_t.min(), log_s_t.max()
+    spec_p_norm = torch.clamp((log_s_p - min_v) / (max_v - min_v + 1e-5), 0.0, 1.0)
+    spec_t_norm = torch.clamp((log_s_t - min_v) / (max_v - min_v + 1e-5), 0.0, 1.0)
+    
+    # 4. Shape for torchmetrics SSIM: requires [Batch, Channel, Height, Width]
+    if spec_p_norm.ndim == 2: # [Freq, Time]
+        spec_p_norm = spec_p_norm.unsqueeze(0).unsqueeze(0)
+        spec_t_norm = spec_t_norm.unsqueeze(0).unsqueeze(0)
+    elif spec_p_norm.ndim == 3: # [Batch, Freq, Time]
+        spec_p_norm = spec_p_norm.unsqueeze(1)
+        spec_t_norm = spec_t_norm.unsqueeze(1)
+        
+    return ssim_func(spec_p_norm, spec_t_norm, data_range=1.0).item()
 
 def balance_grad_norm(
     model:nn.Module,
@@ -103,27 +126,3 @@ def balance_grad_norm(
         torch.nn.utils.clip_grad_norm_(parameters=model.parameters(), max_norm=norms)
         
     return sum([float(i.item() * w) for i, w in zip(losses, weights)])
-
-def gamma_loss(x:torch.Tensor):
-    return F.relu(0.1-x).mean()
-
-class ModelEMA:
-    def __init__(self, model, decay=0.999):
-        self.decay = decay
-        self.shadow = {}
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.data.clone().detach()
-
-    @torch.no_grad()
-    def update(self, model):
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                new_average = (self.shadow[name] * self.decay) + (param.data * (1.0 - self.decay))
-                self.shadow[name].copy_(new_average)
-
-    @torch.no_grad()
-    def apply_shadow(self, model):
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                param.data.copy_(self.shadow[name])

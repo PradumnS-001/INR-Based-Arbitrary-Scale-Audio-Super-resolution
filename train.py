@@ -1,16 +1,43 @@
 import torch
 from torch.nn import functional as F
 from torchaudio.functional import resample
-from torchmetrics.audio import SignalNoiseRatio
 from tqdm import tqdm
 import numpy as np
 import gc
 import os
+import soundfile
 
 from data import tr_loader, val_loader
 from configs import *
 from models import ImprovedLISA
-from extraUtils.loss import WaveLoss, log_spectral_distance, ModelEMA
+from extraUtils.loss import WaveLoss, log_spectral_distance, compute_audio_ssim, ganin_scheduler
+from extraUtils.layers import ModelEMA
+
+def calc_loss(
+    predA:torch.Tensor,
+    predB:torch.Tensor,
+    base:torch.Tensor, 
+    epoch:int=None, 
+    stochastic:bool = noisy_start<num_blocks)->torch.Tensor:
+    
+    waveloss = WaveLoss().to(base.device)
+    mssl = mssl_wt * (waveloss(predA,base) + waveloss(predB,base)) / 2
+    l1_anchor = l1_wt * F.l1_loss((predA+predB)/2,base)
+    
+    l1_repel = 0
+    if stochastic:
+        n_fft = 512
+        hop = n_fft // 4
+        window = torch.hann_window(n_fft, device=base.device)
+        magA = torch.stft(predA.squeeze(1).float(), n_fft, hop_length=hop, window=window.float(), return_complex=True).abs()
+        magB = torch.stft(predB.squeeze(1).float(), n_fft, hop_length=hop, window=window.float(), return_complex=True).abs()
+        log_magA = torch.log(magA + 1e-5)
+        log_magB = torch.log(magB + 1e-5)
+        stft_diff = F.l1_loss(log_magA, log_magB)
+        l1_repel = dist_wt * torch.clamp(0.1 - stft_diff, min=0.0)
+        if (epoch+1): l1_repel *= ganin_scheduler(epoch)
+    
+    return mssl + l1_anchor + l1_repel
 
 def main():
 
@@ -21,17 +48,29 @@ def main():
     cast_type = torch.bfloat16 if supported else torch.float16
     torch.backends.cudnn.benchmark = False
 
-    waveloss = WaveLoss().to(device)
-    snr_metric = SignalNoiseRatio().to(device)
-
-    model =ImprovedLISA().to(device)
+    model = ImprovedLISA().to(device)
     ema = ModelEMA(model=model)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wdc)
+    decay_params = []
+    no_decay_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.ndim == 1 or 'bias' in name:
+            no_decay_params.append(param)
+        elif 'weight_g' in name:
+            no_decay_params.append(param)
+        elif 'weight_v' in name:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+    optimizer = torch.optim.Adam([
+        {'params': decay_params, 'weight_decay': wdc},
+        {'params': no_decay_params, 'weight_decay': 0.0}
+    ], lr=lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
-    scalar = torch.amp.GradScaler(device=device)
-    
+    scalar = torch.amp.GradScaler(device=device, enabled=not supported)
     best_lsd = float('inf')
-    best_snr = -1*float('inf')
+    best_ssim = float('-inf')
 
     for epoch in range(epochs):
         
@@ -42,28 +81,26 @@ def main():
         for i, (lr_wav, hr_wav) in enumerate(pbar):
             
             lr_wav:torch.Tensor = lr_wav.to(device, non_blocking=True)
-            scale = np.random.randint(50, int(50*high_sampling_rate/low_sampling_rate + 1)) / 50
+            scale = np.random.randint(scale_res, int(scale_res*high_sampling_rate/low_sampling_rate + 1)) / scale_res
             hsr_new = int(low_sampling_rate * scale)
             with torch.no_grad(): 
                 hr_wav = resample(hr_wav, high_sampling_rate, hsr_new)
-                lr_wave_base = F.interpolate(lr_wav, size=hsr_new, mode='linear', align_corners=True)
-            
+                lr_wave_base = resample(lr_wav,low_sampling_rate,hsr_new)
             hr_wav:torch.Tensor = hr_wav.to(device, non_blocking=True)
-            
             with torch.autocast(device_type=device, dtype=cast_type):
-                pred,gamma_loss = model(lr_wav, scale=scale)
-                min_len = min(pred.shape[-1],hr_wav.shape[-1])
-                pred, hr_wav = pred[...,:min_len], hr_wav[...,:min_len]
-                lr_wave_base = lr_wave_base[...,:min_len]
-                pred += lr_wave_base
+                predA,predB = model(lr_wav, scale=scale)
                 
-                wl = waveloss(pred, hr_wav)
-                l1_penalty = F.l1_loss(pred, hr_wav)
-                loss:torch.Tensor = mssl_wt * wl[0] + l1_wt * l1_penalty + var_wt * wl[1] + g_wt * gamma_loss
+                min_len = min([predA.shape[-1],hr_wav.shape[-1],predB.shape[-1]])
+                predA, hr_wav, lr_wave_base, predB = predA[...,:min_len], hr_wav[...,:min_len], lr_wave_base[...,:min_len], predB[...,:min_len]
+                
+                predA = predA + lr_wave_base
+                predB = predB + lr_wave_base
+                
+                loss = calc_loss(predA=predA,predB=predB,base=hr_wav,epoch=epoch)
                 loss = loss / update_step
-            
-            if supported : loss.backward()
-            else : scalar.scale(loss).backward()
+                
+                if supported : loss.backward()
+                else : scalar.scale(loss).backward()
             
             pbar.set_postfix({"loss": loss.item() * update_step})
             if (i + 1) % update_step == 0 or (i + 1) == len(tr_loader):
@@ -80,8 +117,8 @@ def main():
         torch.cuda.empty_cache()
         
         model.eval()
-        snr_metric.reset()
         avg_lsd = 0
+        avg_ssim = 0
         with torch.no_grad():
             
             active_params = {n: p.data.clone() for n, p in model.named_parameters()}
@@ -93,7 +130,7 @@ def main():
                 scale = val_scale
                 hsr_new = int(low_sampling_rate * scale)
                 hr_wav = resample(hr_wav, high_sampling_rate, hsr_new)
-                lr_wave_base = F.interpolate(lr_wav, size=hsr_new, mode='linear', align_corners=True)
+                lr_wave_base = resample(lr_wav,low_sampling_rate,hsr_new)
                 
                 pred,_ = model(lr_wav, scale=scale)
                 min_len = min(pred.shape[-1],hr_wav.shape[-1])
@@ -101,14 +138,14 @@ def main():
                 lr_wave_base = lr_wave_base[...,:min_len]
                 pred += lr_wave_base
                 
-                snr_metric(pred, hr_wav)
                 avg_lsd += log_spectral_distance(pred, hr_wav).item()
-                
-        current_val_snr = snr_metric.compute().item()
+                avg_ssim += compute_audio_ssim(waveform_pred=pred, waveform_target=hr_wav,sample_rate=hsr_new)
         current_val_lsd = avg_lsd / len(val_loader)
+        current_val_ssim = avg_ssim / len(val_loader)
+        print(f"Epoch {epoch} | Val LSD: {current_val_lsd:.4f} | Val ssim: {current_val_ssim:.4f}")
         
-        print(f"Epoch {epoch} | Val SNR: {current_val_snr:.2f} | Val LSD: {current_val_lsd:.4f}")
-        
+        os.makedirs('models', exist_ok=True)
+        os.makedirs('audio', exist_ok=True)
         if current_val_lsd <= best_lsd:
             best_lsd = current_val_lsd
             torch.save({
@@ -116,22 +153,34 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'lsd': best_lsd,
-                'snr': current_val_snr
-            }, os.path.join('models',"lisa_best_model_lsd.pt"))
+                'ssim': current_val_ssim
+            }, os.path.join('models',"lisa_best_model_lsd.pth"))
+            soundfile.write(os.path.join('audio',"lisa_best_clip_actual_lsd.wav"), hr_wav.cpu()[0,...].mT.contiguous().numpy(), hsr_new)
+            save = pred.cpu()[0,...].mT
+            maxv = max(save.abs().max().item(),1)
+            save /= maxv
+            soundfile.write(os.path.join('audio',"lisa_best_clip_predicted_lsd.wav"), save.contiguous().numpy(), hsr_new)
             print(f"--> Best model saved with LSD: {best_lsd:.4f}")
-        if current_val_snr >= best_snr:
-            best_snr = current_val_snr
+            
+        if current_val_ssim >= best_ssim:
+            best_ssim = current_val_ssim
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'lsd': current_val_lsd,
-                'snr': best_snr
-            }, os.path.join('models',"lisa_best_model_snr.pt"))
-            print(f"--> Best model saved with SNR: {best_snr:.4f}")
+                'ssim': best_ssim
+            }, os.path.join('models',"lisa_best_model_ssim.pth"))
+            soundfile.write(os.path.join('audio',"lisa_best_clip_actual_ssim.wav"), hr_wav.cpu()[0,...].mT.contiguous().numpy(), hsr_new)
+            save = pred.cpu()[0,...].mT
+            maxv = max(save.abs().max().item(),1)
+            save /= maxv
+            soundfile.write(os.path.join('audio',"lisa_best_clip_predicted_ssim.wav"), save.contiguous().numpy(), hsr_new)
+            print(f"--> Best model saved with SSIM: {best_ssim:.4f}")
+            
         for n, p in model.named_parameters(): p.data.copy_(active_params[n])
         del active_params
-        scheduler.step()
+        if epoch >= scheduler_start: scheduler.step()
         
 if __name__ == "__main__":
     main()
