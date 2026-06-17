@@ -153,7 +153,7 @@ class ImprovedLISA(nn.Module):
         idx_i = torch.round(t_select).long().clamp(0, L_lr - 1)
         t_rel = (t_hr - idx_i.float()).unsqueeze(-1)
         
-        freq_exps = torch.arange(3, device=x_lr.device, dtype=torch.float32)
+        freq_exps = torch.arange(num_bands, device=x_lr.device, dtype=torch.float32)
         frequencies = self.omega * (2.0 ** freq_exps)
         frequencies = frequencies.view(1, 1, -1)
         t_scaled = t_rel * frequencies
