@@ -18,7 +18,7 @@ try:
 except ImportError:
     raise ImportError("Please install PESQ support: pip install pesq torchmetrics[audio]")
 
-def plot_mel_spectrogram_triple(y_true, y_det, y_stoc, sr, save_path):
+def plot_mel_spectrogram_triple(y_true, y_det, y_stoc, base, sr, save_path):
     """Generates a 3-way Mel Spectrogram comparison (Truth vs Det vs Stoc)."""
     mel_transform = torchaudio.transforms.MelSpectrogram(sample_rate=sr, n_mels=80, n_fft=512)
     db_transform = torchaudio.transforms.AmplitudeToDB(top_db=80)
@@ -26,20 +26,25 @@ def plot_mel_spectrogram_triple(y_true, y_det, y_stoc, sr, save_path):
     mel_true = db_transform(mel_transform(y_true.cpu())).squeeze().numpy()
     mel_det = db_transform(mel_transform(y_det.cpu())).squeeze().numpy()
     mel_stoc = db_transform(mel_transform(y_stoc.cpu())).squeeze().numpy()
+    base = db_transform(mel_transform(base.cpu())).squeeze().numpy()
 
-    fig, axes = plt.subplots(3, 1, figsize=(10, 12))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 12))
     
-    im0 = axes[0].imshow(mel_true, aspect='auto', origin='lower', cmap='viridis')
-    axes[0].set_title('Ground Truth')
-    fig.colorbar(im0, ax=axes[0], format="%+2.0f dB")
+    im0 = axes[0,0].imshow(mel_true, aspect='auto', origin='lower', cmap='magma')
+    axes[0,0].set_title('Ground Truth')
+    fig.colorbar(im0, ax=axes[0,0], format="%+2.0f dB")
 
-    im1 = axes[1].imshow(mel_det, aspect='auto', origin='lower', cmap='viridis')
-    axes[1].set_title('Deterministic (Regression to Mean)')
-    fig.colorbar(im1, ax=axes[1], format="%+2.0f dB")
+    im1 = axes[0,1].imshow(mel_det, aspect='auto', origin='lower', cmap='magma')
+    axes[0,1].set_title('Deterministic (Regression to Mean)')
+    fig.colorbar(im1, ax=axes[0,1], format="%+2.0f dB")
 
-    im2 = axes[2].imshow(mel_stoc, aspect='auto', origin='lower', cmap='viridis')
-    axes[2].set_title('Stochastic (Gamma Noise Added)')
-    fig.colorbar(im2, ax=axes[2], format="%+2.0f dB")
+    im2 = axes[1,0].imshow(mel_stoc, aspect='auto', origin='lower', cmap='magma')
+    axes[1,0].set_title('Stochastic (Gamma Noise Added)')
+    fig.colorbar(im2, ax=axes[1,0], format="%+2.0f dB")
+    
+    im2 = axes[1,1].imshow(base, aspect='auto', origin='lower', cmap='magma')
+    axes[1,1].set_title('Base')
+    fig.colorbar(im2, ax=axes[1,1], format="%+2.0f dB")
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
@@ -62,10 +67,11 @@ def evaluate_and_save(model_path, model_name, device):
     # ---------------------------------------------------------
     # PHASE 3: Mathematical Metrics (LSD & SSIM)
     # ---------------------------------------------------------
-    print(f"\n[Phase 3] Computing Structural Metrics (Stochastic)...")
+    print(f"\n[Phase 2] Computing Structural Metrics (Stochastic)...")
     torch.manual_seed(42) 
     
     avg_lsd, avg_ssim = 0.0, 0.0
+    avg_base_lsd, avg_base_ssim = 0.0, 0.0
 
     with torch.no_grad():
         for lr_wav, hr_wav in tqdm(val_loader, desc=f"Metrics Eval"):
@@ -85,19 +91,22 @@ def evaluate_and_save(model_path, model_name, device):
             
             avg_lsd += log_spectral_distance(pred, hr_wav).item()
             avg_ssim += compute_audio_ssim(pred, hr_wav, sample_rate=hsr_new)
+            avg_base_lsd += log_spectral_distance(lr_wave_base, hr_wav).item()
+            avg_base_ssim += compute_audio_ssim(lr_wave_base, hr_wav, sample_rate=hsr_new)
 
     num_batches = len(val_loader)
-    print(f"\nPhase 3 Results for {model_name}:")
-    print(f"--> SSIM:             {avg_ssim / num_batches:.4f}")
-    print(f"--> LSD:              {avg_lsd / num_batches:.4f}")
+    print(f"\nPhase 2 Results for {model_name}:")
+    print(f"--> LSD:  {avg_lsd / num_batches:.4f}  |  (Base: {avg_base_lsd / num_batches:.4f})")
+    print(f"--> SSIM: {avg_ssim / num_batches:.4f}  |  (Base: {avg_base_ssim / num_batches:.4f})")
 
     # ---------------------------------------------------------
     # PHASE 4: Full-Clip Artifacts & PESQ Eval
     # ---------------------------------------------------------
-    print(f"\n[Phase 4] Evaluating PESQ & Generating Dual Artifacts...")
+    print(f"\n[Phase 3] Evaluating PESQ & Generating Dual Artifacts...")
     
     pesq_metric = PerceptualEvaluationSpeechQuality(fs=16000, mode='wb').to(device)
     avg_pesq_det, avg_pesq_stoc = 0.0, 0.0
+    avg_base_pesq = 0.0
     pesq_count = 0
 
     with torch.no_grad():
@@ -126,8 +135,10 @@ def evaluate_and_save(model_path, model_name, device):
             pred_det_16k = resample(pred_det, hsr_new, 16000).squeeze(1)
             pred_stoc_16k = resample(pred_stoc, hsr_new, 16000).squeeze(1)
             hr_16k = resample(hr_wav, hsr_new, 16000).squeeze(1)
+            base_16k = resample(lr_wave_base, hsr_new, 16000).squeeze(1)
 
             try:
+                avg_base_pesq += pesq_metric(base_16k, hr_16k).item()
                 avg_pesq_det += pesq_metric(pred_det_16k, hr_16k).item()
                 avg_pesq_stoc += pesq_metric(pred_stoc_16k, hr_16k).item()
                 pesq_count += 1
@@ -150,14 +161,15 @@ def evaluate_and_save(model_path, model_name, device):
             # --- Save Spectrograms (Indices 8 to 11) ---
             elif idx >= 8 and idx < 12:
                 img_save_path = os.path.join('image', f"{model_name}_mel_comparison_{idx}.png")
-                plot_mel_spectrogram_triple(hr_wav[0], pred_det[0], pred_stoc[0], hsr_new, img_save_path)
+                plot_mel_spectrogram_triple(hr_wav[0], pred_det[0], pred_stoc[0], base_add[0], hsr_new, img_save_path)
 
     if pesq_count > 0:
-        print(f"\nPhase 4 PESQ Results for {model_name} ({pesq_count} clips):")
+        print(f"\nPhase 3 PESQ Results for {model_name} ({pesq_count} clips):")
         print(f"--> Deterministic PESQ: {avg_pesq_det / pesq_count:.4f}")
         print(f"--> Stochastic PESQ:    {avg_pesq_stoc / pesq_count:.4f}")
+        print(f"--> PESQ Base: {avg_base_pesq / pesq_count:.4f}")
     else:
-        print("\nPhase 4 PESQ Results: Failed to compute (no valid utterances).")
+        print("\nPhase 3 PESQ Results: Failed to compute (no valid utterances).")
 
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'

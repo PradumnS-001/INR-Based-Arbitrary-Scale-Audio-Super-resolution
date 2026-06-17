@@ -10,10 +10,10 @@ class AffineTransformation(nn.Module):
     def __init__(self, in_feats = mdim, out_feats = mdim, noisify:bool=True):
         super().__init__()
         
+        self.norm = nn.RMSNorm(in_feats)
         self.fc1 = nn.Linear(in_feats, out_feats)
-        self.fc2 = WeightNormLinear(out_feats,out_feats)
+        self.fc2 = nn.Linear(out_feats,out_feats)
         self.actv = getActivation(actfd)
-        self.scalar = nn.Parameter(torch.tensor(0.70710678).view(1, 1, 1))
         if noisify:
             self.gamma_vec = nn.Parameter(torch.zeros(1,1,out_feats))
         self.noisify = noisify
@@ -27,18 +27,18 @@ class AffineTransformation(nn.Module):
         
         skip = canvas
         B, L, _ = canvas.shape
-        x = self.fc1(canvas * alpha)
+        canvas = self.fc1(self.norm(canvas) * alpha)
         weight_sq = self.fc1.weight.pow(2).float()
         alpha_sq = alpha.pow(2).float()
         demod = torch.rsqrt(F.linear(alpha_sq, weight_sq) + 1e-5)
-        canvas = x * demod
+        canvas = canvas * demod
         
         if self.noisify and stochastic:
             noise = torch.randn(B,L,1, device=canvas.device)
             canvas = canvas + gamma * self.gamma_vec * noise
         canvas = self.fc2(self.actv(canvas + beta))
         
-        return torch.tensor(0.70710678, device=canvas.device) * skip + self.scalar * canvas
+        return skip + canvas
     
 class ImprovedLISA(nn.Module):
     def __init__(self):
@@ -102,11 +102,7 @@ class ImprovedLISA(nn.Module):
             for i in range(num_blocks)
         ])
         
-        self.output_block = nn.Sequential(
-            getActivation(act=actfd),
-            nn.Linear(mdim, 1)
-        )
-        
+        self.output_block = nn.Linear(mdim, 1)
         self.omega = nn.Parameter(torch.tensor(omega)) if is_omega_trainable else torch.tensor(omega)
         nn.init.constant_(self.alpha_branch[-1].bias, 1)
         nn.init.constant_(self.beta_branch[-1].bias, 0)

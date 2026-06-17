@@ -121,6 +121,8 @@ def main():
         model.eval()
         avg_lsd = 0
         avg_ssim = 0
+        avg_base_lsd = 0
+        avg_base_ssim = 0
         with torch.no_grad():
             
             active_params = {n: p.data.clone() for n, p in model.named_parameters()}
@@ -142,9 +144,13 @@ def main():
                 
                 avg_lsd += log_spectral_distance(pred, hr_wav).item()
                 avg_ssim += compute_audio_ssim(waveform_pred=pred, waveform_target=hr_wav,sample_rate=hsr_new)
+                avg_base_lsd += log_spectral_distance(lr_wave_base, hr_wav).item()
+                avg_base_ssim += compute_audio_ssim(waveform_pred=lr_wave_base, waveform_target=hr_wav, sample_rate=hsr_new)
         current_val_lsd = avg_lsd / len(val_loader)
         current_val_ssim = avg_ssim / len(val_loader)
-        print(f"Epoch {epoch} | Val LSD: {current_val_lsd:.4f} | Val ssim: {current_val_ssim:.4f}")
+        current_base_lsd = avg_base_lsd / len(val_loader)
+        current_base_ssim = avg_base_ssim / len(val_loader)
+        print(f"Epoch {epoch} | Val LSD: {current_val_lsd:.4f} (Base: {current_base_lsd:.4f}) | Val SSIM: {current_val_ssim:.4f} (Base: {current_base_ssim:.4f})")
         
         os.makedirs('models', exist_ok=True)
         os.makedirs('audio', exist_ok=True)

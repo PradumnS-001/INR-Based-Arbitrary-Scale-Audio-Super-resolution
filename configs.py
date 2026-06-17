@@ -20,10 +20,10 @@ epochs = 60
 step_size = 5
 gamma = 0.2
 wdc = 1e-4
-scheduler_start = 4
+scheduler_start = 1
 
 max_norm = 0.01
-l1_wt = 5
+l1_wt = 0.05
 dist_wt = 1
 mssl_wt = 1
 
