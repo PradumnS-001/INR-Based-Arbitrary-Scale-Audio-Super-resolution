@@ -8,7 +8,7 @@ from configs import *
 
 np.random.seed(seed)
 generator = torch.Generator().manual_seed(seed)
-
+    
 class AudioCorpus(Dataset):
     
     def __init__(self, 
@@ -69,3 +69,26 @@ val12_indices = val_set.indices[:12]
 val12_files = [dataset.files[i] for i in val12_indices]
 val12_set = AudioCorpus(file_list=val12_files, trunc=False)
 val12_loader = DataLoader(val12_set, batch_size=1, shuffle=False, num_workers=0)
+
+@torch.no_grad()
+def calc_opcs(data: AudioCorpus) -> torch.Tensor:
+    count = 0
+    total_sum = 0.0
+    total_sq_sum = 0.0
+    total_elements = 0
+    
+    for lr_wav, hr_wav in data:
+        lr_wav = resample(lr_wav, low_sampling_rate, high_sampling_rate)
+        min_len = min(lr_wav.shape[-1], hr_wav.shape[-1])
+        diff = hr_wav[..., :min_len] - lr_wav[..., :min_len]
+        total_sum += diff.sum().item()
+        total_sq_sum += (diff ** 2).sum().item()
+        total_elements += diff.numel()
+        
+        count += 1
+        if count >= (1024 / batch_size): 
+            break
+    true_variance = (total_sq_sum / total_elements) - (total_sum / total_elements) ** 2
+    true_std = torch.tensor(true_variance).sqrt()
+    
+    return true_std * 5

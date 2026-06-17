@@ -29,7 +29,7 @@ mssl_wt = 1
 
 is_omega_trainable = False
 omega = np.pi
-num_bands = 3
+num_bands = 5
 mdim = 128
 
 num_blocks = 7

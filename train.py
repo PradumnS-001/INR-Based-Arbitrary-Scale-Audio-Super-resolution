@@ -5,9 +5,9 @@ from tqdm import tqdm
 import numpy as np
 import gc
 import os
-import soundfile
+import soundfile as sf
 
-from data import tr_loader, val_loader
+from data import tr_loader, val_loader, calc_opcs
 from configs import *
 from models import ImprovedLISA
 from extraUtils.loss import WaveLoss, log_spectral_distance, compute_audio_ssim, ganin_scheduler
@@ -49,7 +49,8 @@ def main():
     cast_type = torch.bfloat16 if supported else torch.float16
     torch.backends.cudnn.benchmark = False
 
-    model = ImprovedLISA().to(device)
+    model = ImprovedLISA(opcs=calc_opcs(tr_loader)).to(device)
+    print(model.opcs.item())
     count_params(model=model)
     ema = ModelEMA(model=model)
     decay_params = []
@@ -68,7 +69,7 @@ def main():
     optimizer = torch.optim.Adam([
         {'params': decay_params, 'weight_decay': wdc},
         {'params': no_decay_params, 'weight_decay': 0.0}
-    ], lr=lr)
+    ], lr=lr,eps=1e-12)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
     scalar = torch.amp.GradScaler(device=device, enabled=not supported)
     best_lsd = float('inf')
@@ -163,11 +164,11 @@ def main():
                 'lsd': best_lsd,
                 'ssim': current_val_ssim
             }, os.path.join('models',"lisa_best_model_lsd.pth"))
-            soundfile.write(os.path.join('audio',"lisa_best_clip_actual_lsd.wav"), hr_wav.cpu()[0,...].mT.contiguous().numpy(), hsr_new)
+            sf.write(os.path.join('audio',"lisa_best_clip_actual_lsd.wav"), hr_wav.cpu()[0,...].mT.contiguous().numpy(), hsr_new)
             save = pred.cpu()[0,...].mT
             maxv = max(save.abs().max().item(),1)
             save /= maxv
-            soundfile.write(os.path.join('audio',"lisa_best_clip_predicted_lsd.wav"), save.contiguous().numpy(), hsr_new)
+            sf.write(os.path.join('audio',"lisa_best_clip_predicted_lsd.wav"), save.contiguous().numpy(), hsr_new)
             print(f"--> Best model saved with LSD: {best_lsd:.4f}")
             
         if current_val_ssim >= best_ssim:
@@ -179,11 +180,11 @@ def main():
                 'lsd': current_val_lsd,
                 'ssim': best_ssim
             }, os.path.join('models',"lisa_best_model_ssim.pth"))
-            soundfile.write(os.path.join('audio',"lisa_best_clip_actual_ssim.wav"), hr_wav.cpu()[0,...].mT.contiguous().numpy(), hsr_new)
+            sf.write(os.path.join('audio',"lisa_best_clip_actual_ssim.wav"), hr_wav.cpu()[0,...].mT.contiguous().numpy(), hsr_new)
             save = pred.cpu()[0,...].mT
             maxv = max(save.abs().max().item(),1)
             save /= maxv
-            soundfile.write(os.path.join('audio',"lisa_best_clip_predicted_ssim.wav"), save.contiguous().numpy(), hsr_new)
+            sf.write(os.path.join('audio',"lisa_best_clip_predicted_ssim.wav"), save.contiguous().numpy(), hsr_new)
             print(f"--> Best model saved with SSIM: {best_ssim:.4f}")
             
         for n, p in model.named_parameters(): p.data.copy_(active_params[n])

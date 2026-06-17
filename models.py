@@ -41,11 +41,13 @@ class AffineTransformation(nn.Module):
         return skip + canvas
     
 class ImprovedLISA(nn.Module):
-    def __init__(self):
+    def __init__(self, opcs:torch.Tensor=torch.tensor(0.03)):
         super().__init__()
         
         self.macro_encoder = SEANetEncoder(n_filters=32, dimension=mdim, ratios=[4,4], lstm=0)
         self.macro_proj = nn.Conv1d(mdim, int(0.75*mdim), kernel_size=1)
+        self.opcs = opcs
+        self.opcs.clamp_(min=0.001)
         
         self.micro_encoder = nn.Sequential(
             nn.Conv1d(1, 16, kernel_size=7, padding=3),
@@ -102,7 +104,13 @@ class ImprovedLISA(nn.Module):
             for i in range(num_blocks)
         ])
         
-        self.output_block = nn.Linear(mdim, 1)
+        self.output_block = nn.Sequential(
+            WeightNormLinear(mdim, mdim // 2),
+            getActivation(actfd),
+            WeightNormLinear(mdim // 2, mdim // 4),
+            getActivation(actfd),
+            nn.Linear(mdim // 4, 1)
+        )
         self.omega = nn.Parameter(torch.tensor(omega)) if is_omega_trainable else torch.tensor(omega)
         nn.init.constant_(self.alpha_branch[-1].bias, 1)
         nn.init.constant_(self.beta_branch[-1].bias, 0)
@@ -186,7 +194,7 @@ class ImprovedLISA(nn.Module):
                 pA = self.affine_transformations[i](alpha, beta, gamma*dropA, pA)
                 pB = self.affine_transformations[i](alpha, beta, gamma*dropB, pB)
                 
-            return self.output_block(pA).mT.contiguous(),self.output_block(pB).mT.contiguous()
+            return self.output_block(pA).mT.contiguous() * self.opcs,self.output_block(pB).mT.contiguous() * self.opcs
         
-        res = self.output_block(canvas).mT.contiguous()
+        res = self.output_block(canvas).mT.contiguous() * self.opcs
         return res, res.clone()
