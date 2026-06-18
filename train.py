@@ -19,23 +19,33 @@ def calc_loss(
     predB:torch.Tensor,
     base:torch.Tensor, 
     epoch:int=None, 
-    stochastic:bool = noisy_start<num_blocks)->torch.Tensor:
+    stochastic:bool = noisy_start<num_blocks,
+    scale: float = 1.0)->torch.Tensor:
     
     waveloss = WaveLoss().to(base.device)
-    mssl = mssl_wt * (waveloss(predA,base) + waveloss(predB,base)) / 2
+    mssl = mssl_wt * (waveloss(predA,base,scale) + waveloss(predB,base,scale)) / 2
     l1_anchor = l1_wt * F.l1_loss((predA+predB)/2,base)
     
-    l1_repel = 0
+    l1_repel = torch.tensor(0, device=base.device, dtype=torch.float32)
     if stochastic:
-        n_fft = 512
-        hop = n_fft // 4
-        window = torch.hann_window(n_fft, device=base.device)
-        magA = torch.stft(predA.squeeze(1).float(), n_fft, hop_length=hop, window=window.float(), return_complex=True).abs()
-        magB = torch.stft(predB.squeeze(1).float(), n_fft, hop_length=hop, window=window.float(), return_complex=True).abs()
-        log_magA = torch.log(magA + 1e-5)
-        log_magB = torch.log(magB + 1e-5)
-        stft_diff = F.l1_loss(log_magA, log_magB)
-        l1_repel = dist_wt * torch.clamp(0.1 - stft_diff, min=0.0)
+        n_ffts = [128,64]
+        for n_fft in n_ffts:
+            hop = n_fft // 4
+            window = torch.hann_window(n_fft, device=base.device)
+            
+            magA = torch.stft(predA.squeeze(1).float(), n_fft, hop_length=hop, window=window.float(), return_complex=True).abs()
+            magB = torch.stft(predB.squeeze(1).float(), n_fft, hop_length=hop, window=window.float(), return_complex=True).abs()
+            
+            cutoff_ratio = 1.0 / scale
+            cutoff_bin = int(magA.shape[1] * cutoff_ratio)
+            magB = magB[:, cutoff_bin:, :]
+            magA = magA[:, cutoff_bin:, :]
+            
+            log_magA = torch.log(magA + 1e-5)
+            log_magB = torch.log(magB + 1e-5)
+            stft_diff = F.l1_loss(log_magA, log_magB)
+            l1_repel += dist_wt * torch.clamp(0.1 - stft_diff, min=0.0)
+            
         if (epoch+1): l1_repel *= ganin_scheduler(epoch)
     
     return mssl + l1_anchor + l1_repel
@@ -96,14 +106,17 @@ def main():
                 min_len = min([predA.shape[-1],hr_wav.shape[-1],predB.shape[-1]])
                 predA, hr_wav, lr_wave_base, predB = predA[...,:min_len], hr_wav[...,:min_len], lr_wave_base[...,:min_len], predB[...,:min_len]
                 
-                predA = predA + lr_wave_base
-                predB = predB + lr_wave_base
-                
-                loss = calc_loss(predA=predA,predB=predB,base=hr_wav,epoch=epoch)
-                loss = loss / update_step
-                
-                if supported : loss.backward()
-                else : scalar.scale(loss).backward()
+            predA,predB = predA.float(),predB.float()
+            lr_wave_base, hr_wav = lr_wave_base.float(), hr_wav.float()
+            
+            predA = predA + lr_wave_base
+            predB = predB + lr_wave_base
+            
+            loss = calc_loss(predA=predA,predB=predB,base=hr_wav,epoch=epoch,scale=scale)
+            loss = loss / update_step
+            
+            if supported : loss.backward()
+            else : scalar.scale(loss).backward()
             
             pbar.set_postfix({"loss": loss.item() * update_step})
             if (i + 1) % update_step == 0 or (i + 1) == len(tr_loader):

@@ -17,19 +17,19 @@ scale_res = 50
 
 lr = 1e-3
 epochs = 60
-step_size = 5
+step_size = 6
 gamma = 0.2
 wdc = 1e-4
-scheduler_start = 1
+scheduler_start = 0
 
-max_norm = 0.01
-l1_wt = 0.05
-dist_wt = 1
-mssl_wt = 1
+max_norm = 1
+l1_wt = 0.1
+dist_wt = 2
+mssl_wt = 5
 
 is_omega_trainable = False
 omega = np.pi
-num_bands = 5
+num_bands = 6
 mdim = 128
 
 num_blocks = 7

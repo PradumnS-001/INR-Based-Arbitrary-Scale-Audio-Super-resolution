@@ -86,9 +86,9 @@ def calc_opcs(data: AudioCorpus) -> torch.Tensor:
         total_elements += diff.numel()
         
         count += 1
-        if count >= (1024 / batch_size): 
+        if count >= (4096 / batch_size): 
             break
     true_variance = (total_sq_sum / total_elements) - (total_sum / total_elements) ** 2
     true_std = torch.tensor(true_variance).sqrt()
     
-    return true_std * 5
+    return true_std

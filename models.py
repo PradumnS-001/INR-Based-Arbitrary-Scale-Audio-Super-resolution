@@ -59,14 +59,11 @@ class ImprovedLISA(nn.Module):
             nn.Conv1d(64, mdim - int(0.75*mdim), kernel_size=1)
         )
         
-        self.param_trunk = nn.Sequential(
+        self.alpha_branch = nn.Sequential(
             WeightNormLinear(mdim * 3 + 1, mdim),
             getActivation(act=actfs),
             WeightNormLinear(mdim, mdim),
-            getActivation(act=actfs)
-        )
-        
-        self.alpha_branch = nn.Sequential(
+            getActivation(act=actfs),
             WeightNormLinear(mdim, mdim),
             getActivation(act=actfs),
             WeightNormLinear(mdim, mdim),
@@ -75,6 +72,10 @@ class ImprovedLISA(nn.Module):
         )
         
         self.beta_branch = nn.Sequential(
+            WeightNormLinear(mdim * 3 + 1, mdim),
+            getActivation(act=actfs),
+            WeightNormLinear(mdim, mdim),
+            getActivation(act=actfs),
             WeightNormLinear(mdim, mdim),
             getActivation(act=actfs),
             WeightNormLinear(mdim, mdim),
@@ -83,6 +84,10 @@ class ImprovedLISA(nn.Module):
         )
         
         self.gamma_branch = nn.Sequential(
+            WeightNormLinear(mdim * 3 + 1, mdim),
+            getActivation(act=actfs),
+            WeightNormLinear(mdim, mdim),
+            getActivation(act=actfs),
             WeightNormLinear(mdim, mdim),
             getActivation(act=actfs),
             WeightNormLinear(mdim, mdim),
@@ -107,9 +112,9 @@ class ImprovedLISA(nn.Module):
         self.output_block = nn.Sequential(
             WeightNormLinear(mdim, mdim // 2),
             getActivation(actfd),
-            WeightNormLinear(mdim // 2, mdim // 4),
+            WeightNormLinear(mdim // 2, mdim // 2),
             getActivation(actfd),
-            nn.Linear(mdim // 4, 1)
+            nn.Linear(mdim // 2, 1)
         )
         self.omega = nn.Parameter(torch.tensor(omega)) if is_omega_trainable else torch.tensor(omega)
         nn.init.constant_(self.alpha_branch[-1].bias, 1)
@@ -121,7 +126,7 @@ class ImprovedLISA(nn.Module):
         gen_noise = infer_stoc or self.training
         
         macro_feat = self.macro_proj(self.macro_encoder(x_lr))
-        macro_feat = F.interpolate(macro_feat, size=L_lr, mode='linear', align_corners=False)
+        macro_feat = F.interpolate(macro_feat, size=L_lr, mode='nearest')
         micro_feat = self.micro_encoder(x_lr)
         
         z = torch.cat([macro_feat, micro_feat], dim=1)
@@ -134,10 +139,9 @@ class ImprovedLISA(nn.Module):
         scale_tensor = torch.ones(B, L_lr, 1, device=x_lr.device, dtype=x_lr.dtype) * scale
         feat = torch.cat([scale_tensor, z_triplet], dim=-1)
         
-        base_params = self.param_trunk(feat)
-        alphas = self.alpha_branch(base_params)
-        betas = self.beta_branch(base_params)
-        gammas = self.gamma_branch(base_params)
+        alphas = self.alpha_branch(feat)
+        betas = self.beta_branch(feat)
+        gammas = self.gamma_branch(feat)
         
         if gen_noise and not self.training: gammas *= temperature
         
@@ -145,7 +149,7 @@ class ImprovedLISA(nn.Module):
         t_hr = t_hr.unsqueeze(0).repeat(B, 1)
         
         if self.training and do_perturbation:
-            eta = torch.randn_like(t_hr) * 0.4
+            eta = torch.rand_like(t_hr) - 0.5
             t_select = t_hr + eta
         else:
             t_select = t_hr

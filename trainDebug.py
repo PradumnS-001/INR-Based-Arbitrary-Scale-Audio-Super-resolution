@@ -5,10 +5,11 @@ import soundfile
 import os
 
 # Adjust imports to match your file structure
-from data import tr_loader
+from data import tr_loader, calc_opcs
 from configs import *
 from models import ImprovedLISA
-from extraUtils.loss import WaveLoss, ModelEMA, log_spectral_distance, compute_audio_ssim
+from extraUtils.loss import WaveLoss, log_spectral_distance, compute_audio_ssim
+from extraUtils.layers import ModelEMA
 
 torch.autograd.detect_anomaly(True)
 
@@ -19,7 +20,8 @@ def main():
     torch.backends.cudnn.benchmark = False
 
     waveloss = WaveLoss().to(device)
-    model = ImprovedLISA().to(device)
+    model = ImprovedLISA(opcs=calc_opcs(tr_loader)).to(device)
+    print(model.opcs.item())
     ema = ModelEMA(model=model)
     
     # Lower initial LR to prevent the momentum bounce
@@ -51,7 +53,7 @@ def main():
     best_model_state = None
     
     # 2. Overfit Loop
-    for epoch in range(200):
+    for epoch in range(100):
         model.train()
         optimizer.zero_grad(set_to_none=True)
         
@@ -60,7 +62,7 @@ def main():
         with torch.autocast(device_type=device.split(':')[0], dtype=cast_type):
             # For a strict overfit test, we only need one forward pass. 
             # If your model outputs two (predA, predB) for repel loss, we just use one to check capacity.
-            pred = model(lr_wav, scale=scale)
+            pred = model(lr_wav, scale=scale)[0]
             
             min_len = min(pred.shape[-1], hr_wav.shape[-1])
             pred, hr_wav_c = pred[..., :min_len], hr_wav[..., :min_len]
@@ -105,7 +107,7 @@ def main():
     
     with torch.no_grad():
         with torch.autocast(device_type=device.split(':')[0], dtype=cast_type):
-            pred = model(lr_wav, scale=scale)
+            pred = model(lr_wav, scale=scale)[0]
             pred = pred[..., :min_len] + lr_wave_base_c
             
             final_lsd = log_spectral_distance(pred, hr_wav_c).item()

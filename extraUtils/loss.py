@@ -8,27 +8,33 @@ def ganin_scheduler(epoch):
 
 class WaveLoss(nn.Module):
     
-    def __init__(self, n_ffts=[2048, 512, 128]):
+    def __init__(self, n_ffts=[2048, 512, 128, 64]):
         super().__init__()
         self.n_ffts = n_ffts
+        self.eps = 1e-2
 
-    def forward(self, x_hat: torch.Tensor, x: torch.Tensor)->tuple[torch.Tensor]:
+    def forward(self, x_hat: torch.Tensor, x: torch.Tensor, scale: float)->tuple[torch.Tensor]:
         x = x.squeeze(1)
         x_hat = x_hat.squeeze(1)
         mssl_loss = 0
         
         for n in self.n_ffts:
-            
             hop = n // 4
             window = torch.hann_window(n, device=x.device)
             
             s_hat_abs = torch.stft(x_hat.float(), n, hop_length=hop, window=window.float(), return_complex=True).abs()
             s_abs = torch.stft(x.float(), n, hop_length=hop, window=window.float(), return_complex=True).abs()
             
-            diff_sq = (s_abs - s_hat_abs).pow(2).sum()
-            sc_loss = torch.sqrt(diff_sq + 1e-5) / torch.norm(s_abs, p="fro").clamp(min=1e-5)
+            cutoff_ratio = 1.0 / scale
+            cutoff_bin = int(s_abs.shape[1] * cutoff_ratio)
             
-            mag_loss = F.l1_loss(torch.log(s_hat_abs + 1e-5), torch.log(s_abs + 1e-5))
+            s_hat_abs = s_hat_abs[:, cutoff_bin:, :]
+            s_abs = s_abs[:, cutoff_bin:, :]
+            
+            diff_sq = (s_abs - s_hat_abs).pow(2).sum()
+            sc_loss = torch.sqrt(diff_sq + self.eps) / torch.norm(s_abs, p="fro").clamp(min=self.eps)
+            
+            mag_loss = F.l1_loss(torch.log(s_hat_abs + self.eps), torch.log(s_abs + self.eps))
             mssl_loss += (sc_loss + mag_loss)
         
         return mssl_loss
