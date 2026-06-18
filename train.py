@@ -22,7 +22,7 @@ def calc_loss(
     stochastic:bool = noisy_start<num_blocks,
     scale: float = 1.0)->torch.Tensor:
     
-    waveloss = WaveLoss().to(base.device)
+    waveloss = WaveLoss(eps=log_loss_eps).to(base.device)
     mssl = mssl_wt * (waveloss(predA,base,scale) + waveloss(predB,base,scale)) / 2
     l1_anchor = l1_wt * F.l1_loss((predA+predB)/2,base)
     
@@ -41,8 +41,8 @@ def calc_loss(
             magB = magB[:, cutoff_bin:, :]
             magA = magA[:, cutoff_bin:, :]
             
-            log_magA = torch.log(magA + 1e-5)
-            log_magB = torch.log(magB + 1e-5)
+            log_magA = torch.log(magA + log_loss_eps)
+            log_magB = torch.log(magB + log_loss_eps)
             stft_diff = F.l1_loss(log_magA, log_magB)
             l1_repel += dist_wt * torch.clamp(0.1 - stft_diff, min=0.0)
             

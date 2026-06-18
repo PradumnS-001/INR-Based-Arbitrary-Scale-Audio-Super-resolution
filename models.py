@@ -15,7 +15,7 @@ class AffineTransformation(nn.Module):
         self.fc2 = nn.Linear(out_feats,out_feats)
         self.actv = getActivation(actfd)
         if noisify:
-            self.gamma_vec = nn.Parameter(torch.zeros(1,1,out_feats))
+            self.gamma_vec = nn.Parameter(torch.randn(1,1,out_feats) * temperature)
         self.noisify = noisify
         
     def forward(self,
@@ -46,8 +46,7 @@ class ImprovedLISA(nn.Module):
         
         self.macro_encoder = SEANetEncoder(n_filters=32, dimension=mdim, ratios=[4,4], lstm=0)
         self.macro_proj = nn.Conv1d(mdim, int(0.75*mdim), kernel_size=1)
-        self.opcs = opcs
-        self.opcs.clamp_(min=0.001)
+        self.register_buffer('opcs', opcs.clamp_(min=0.001))
         
         self.micro_encoder = nn.Sequential(
             nn.Conv1d(1, 16, kernel_size=7, padding=3),

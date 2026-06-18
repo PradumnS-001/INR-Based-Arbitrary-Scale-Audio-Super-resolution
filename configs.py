@@ -26,6 +26,7 @@ max_norm = 1
 l1_wt = 0.1
 dist_wt = 2
 mssl_wt = 5
+log_loss_eps = 1e-6
 
 is_omega_trainable = False
 omega = np.pi
