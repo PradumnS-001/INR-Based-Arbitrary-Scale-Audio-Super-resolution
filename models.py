@@ -97,9 +97,9 @@ class ImprovedLISA(nn.Module):
         
         k = (num_bands+1)*2 + mdim
         self.input_projection = nn.Sequential(
-            nn.Linear((num_bands+1)*2, k//4),
+            nn.Linear((num_bands+1)*2, k//2),
             getActivation(actfd),
-            nn.Linear(k//4,k//2),
+            nn.Linear(k//2,k//2),
             getActivation(actfd),
             nn.Linear(k//2,mdim)
         )
@@ -116,8 +116,8 @@ class ImprovedLISA(nn.Module):
             nn.Linear(mdim // 2, 1)
         )
         self.omega = nn.Parameter(torch.tensor(omega)) if is_omega_trainable else torch.tensor(omega)
-        nn.init.constant_(self.alpha_branch[-1].bias, 1)
-        nn.init.constant_(self.beta_branch[-1].bias, 0)
+        nn.init.uniform_(self.alpha_branch[-1].bias, a=0.9, b=1.1)
+        nn.init.uniform_(self.beta_branch[-1].bias, a=-0.1, b=0.1)
 
     def forward(self, x_lr, scale, infer_stoc:bool=False):
         B, _, L_lr = x_lr.shape

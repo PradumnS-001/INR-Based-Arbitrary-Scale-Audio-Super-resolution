@@ -8,12 +8,12 @@ def ganin_scheduler(epoch):
 
 class WaveLoss(nn.Module):
     
-    def __init__(self, n_ffts=[2048, 512, 128, 64], eps:float = 1e-2):
+    def __init__(self, n_ffts=[2048, 512, 128, 64], eps:float = 1e-6):
         super().__init__()
         self.n_ffts = n_ffts
         self.eps = eps
 
-    def forward(self, x_hat: torch.Tensor, x: torch.Tensor, scale: float)->tuple[torch.Tensor]:
+    def forward(self, x_hat: torch.Tensor, x: torch.Tensor, scale: float=1e4)->tuple[torch.Tensor]:
         x = x.squeeze(1)
         x_hat = x_hat.squeeze(1)
         mssl_loss = 0
