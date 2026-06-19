@@ -8,7 +8,7 @@ def ganin_scheduler(epoch):
 
 class WaveLoss(nn.Module):
     
-    def __init__(self, n_ffts=[512, 256, 128, 64], eps:float = 1e-6):
+    def __init__(self, n_ffts=[512, 256], eps:float = 1e-6):
         super().__init__()
         self.n_ffts = n_ffts
         self.eps = eps

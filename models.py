@@ -175,10 +175,10 @@ class ImprovedLISA(nn.Module):
                 beta = gathered_betas[:, :, i, :]
                 gamma = gathered_gammas[:, :, i, :]
                 
-                if self.training and dropA == 1 and dropB == 1:
+                if self.training and dropA == 1 and dropB == 1 and not i == noisy_start:
                     if torch.rand(1).item() < drop_prob: 
                         dropA = 0
-                    elif torch.rand(1).item() < drop_prob: 
+                    if torch.rand(1).item() < drop_prob: 
                         dropB = 0
                 
                 pA = self.affine_transformations[i](alpha, beta, gamma*dropA, pA)

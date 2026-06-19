@@ -30,10 +30,10 @@ log_loss_eps = 1e-3
 
 is_omega_trainable = False
 omega = np.pi
-num_bands = 3
+num_bands = 2
 mdim = 64
 
 num_blocks = 5
 noisy_start = 2
-drop_prob = 0.15
+drop_prob = 0.125
 do_perturbation = True
