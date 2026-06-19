@@ -12,7 +12,7 @@ class AffineTransformation(nn.Module):
         
         self.norm = nn.RMSNorm(in_feats)
         self.fc1 = nn.Linear(in_feats, out_feats)
-        self.fc2 = nn.Linear(out_feats,out_feats)
+        self.fc2 = WeightNormLinear(out_feats,out_feats)
         self.actv = getActivation(actfd)
         if noisify:
             self.gamma_vec = nn.Parameter(torch.randn(1,1,out_feats) * temperature)
@@ -44,8 +44,7 @@ class ImprovedLISA(nn.Module):
     def __init__(self, opcs:torch.Tensor=torch.tensor(0.03)):
         super().__init__()
         
-        self.macro_encoder = SEANetEncoder(n_filters=32, dimension=mdim, ratios=[4,4], lstm=0)
-        self.macro_proj = nn.Conv1d(mdim, int(0.75*mdim), kernel_size=1)
+        self.macro_encoder = SEANetEncoder(n_filters=16, dimension=int(0.75*mdim), ratios=[4,4], lstm=0)
         self.register_buffer('opcs', opcs.clamp_(min=0.001))
         
         self.micro_encoder = nn.Sequential(
@@ -58,9 +57,8 @@ class ImprovedLISA(nn.Module):
             nn.Conv1d(64, mdim - int(0.75*mdim), kernel_size=1)
         )
         
+        self.trunc = nn.Linear(mdim*3, mdim)
         self.alpha_branch = nn.Sequential(
-            WeightNormLinear(mdim * 3 + 1, mdim),
-            getActivation(act=actfs),
             WeightNormLinear(mdim, mdim),
             getActivation(act=actfs),
             WeightNormLinear(mdim, mdim),
@@ -71,8 +69,6 @@ class ImprovedLISA(nn.Module):
         )
         
         self.beta_branch = nn.Sequential(
-            WeightNormLinear(mdim * 3 + 1, mdim),
-            getActivation(act=actfs),
             WeightNormLinear(mdim, mdim),
             getActivation(act=actfs),
             WeightNormLinear(mdim, mdim),
@@ -83,8 +79,6 @@ class ImprovedLISA(nn.Module):
         )
         
         self.gamma_branch = nn.Sequential(
-            WeightNormLinear(mdim * 3 + 1, mdim),
-            getActivation(act=actfs),
             WeightNormLinear(mdim, mdim),
             getActivation(act=actfs),
             WeightNormLinear(mdim, mdim),
@@ -95,13 +89,10 @@ class ImprovedLISA(nn.Module):
             nn.Sigmoid()
         )
         
-        k = (num_bands+1)*2 + mdim
         self.input_projection = nn.Sequential(
-            nn.Linear((num_bands+1)*2, k//2),
+            nn.Linear((num_bands+1)*2, mdim//2),
             getActivation(actfd),
-            nn.Linear(k//2,k//2),
-            getActivation(actfd),
-            nn.Linear(k//2,mdim)
+            nn.Linear(mdim//2,mdim)
         )
         self.affine_transformations = nn.ModuleList([
             AffineTransformation(mdim, mdim, noisify=(i >= noisy_start))
@@ -109,9 +100,7 @@ class ImprovedLISA(nn.Module):
         ])
         
         self.output_block = nn.Sequential(
-            WeightNormLinear(mdim, mdim // 2),
-            getActivation(actfd),
-            WeightNormLinear(mdim // 2, mdim // 2),
+            nn.Linear(mdim, mdim // 2),
             getActivation(actfd),
             nn.Linear(mdim // 2, 1)
         )
@@ -124,7 +113,7 @@ class ImprovedLISA(nn.Module):
         L_hr = int(L_lr * scale)
         gen_noise = infer_stoc or self.training
         
-        macro_feat = self.macro_proj(self.macro_encoder(x_lr))
+        macro_feat = self.macro_encoder(x_lr)
         macro_feat = F.interpolate(macro_feat, size=L_lr, mode='nearest')
         micro_feat = self.micro_encoder(x_lr)
         
@@ -133,14 +122,12 @@ class ImprovedLISA(nn.Module):
         z_prev = z_pad[:, :, :-2]
         z_curr = z_pad[:, :, 1:-1]
         z_next = z_pad[:, :, 2:]
-        z_triplet = torch.cat([z_prev, z_curr, z_next], dim=1).transpose(1, 2)
+        feat = torch.cat([z_prev, z_curr, z_next], dim=1).transpose(1, 2)
         
-        scale_tensor = torch.ones(B, L_lr, 1, device=x_lr.device, dtype=x_lr.dtype) * scale
-        feat = torch.cat([scale_tensor, z_triplet], dim=-1)
-        
-        alphas = self.alpha_branch(feat)
-        betas = self.beta_branch(feat)
-        gammas = self.gamma_branch(feat)
+        trunck = self.trunc(feat)
+        alphas = self.alpha_branch(trunck)
+        betas = self.beta_branch(trunck)
+        gammas = self.gamma_branch(trunck)
         
         if gen_noise and not self.training: gammas *= temperature
         

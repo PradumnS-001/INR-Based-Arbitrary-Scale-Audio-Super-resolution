@@ -46,7 +46,7 @@ def calc_loss(
             stft_diff = F.l1_loss(log_magA, log_magB)
             l1_repel += dist_wt * torch.clamp(0.1 - stft_diff, min=0.0)
             
-        if (epoch+1): l1_repel *= ganin_scheduler(epoch)
+        if (epoch+1): l1_repel *= max(0.25,ganin_scheduler(epoch))
     
     return mssl + l1_anchor + l1_repel
 
@@ -61,7 +61,8 @@ def main():
 
     model = ImprovedLISA(opcs=calc_opcs(tr_loader)).to(device)
     print(model.opcs.item())
-    count_params(model=model)
+    ours = count_params(model=model)
+    print('Our param count / Lisa\'s param count: ',ours / 89000)
     ema = ModelEMA(model=model)
     decay_params = []
     no_decay_params = []
