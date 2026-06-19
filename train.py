@@ -44,7 +44,7 @@ def calc_loss(
             log_magA = torch.log(magA + log_loss_eps)
             log_magB = torch.log(magB + log_loss_eps)
             stft_diff = F.l1_loss(log_magA, log_magB)
-            l1_repel += dist_wt * torch.clamp(0.1 - stft_diff, min=0.0)
+            l1_repel += dist_wt * torch.clamp(0.05 - stft_diff, min=0.0)
             
         if (epoch+1): l1_repel *= max(0.25,ganin_scheduler(epoch))
     

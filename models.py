@@ -15,7 +15,7 @@ class AffineTransformation(nn.Module):
         self.fc2 = WeightNormLinear(out_feats,out_feats)
         self.actv = getActivation(actfd)
         if noisify:
-            self.gamma_vec = nn.Parameter(torch.randn(1,1,out_feats) * temperature)
+            self.gamma_vec = nn.Parameter(torch.randn(1,1,out_feats))
         self.noisify = noisify
         
     def forward(self,
@@ -135,12 +135,12 @@ class ImprovedLISA(nn.Module):
         t_hr = t_hr.unsqueeze(0).repeat(B, 1)
         
         if self.training and do_perturbation:
-            eta = torch.rand_like(t_hr) - 0.5
+            eta = torch.randn_like(t_hr) * 0.4
             t_select = t_hr + eta
         else:
             t_select = t_hr
             
-        idx_i = torch.round(t_select).long().clamp(0, L_lr - 1)
+        idx_i = torch.floor(t_select).long().clamp(0, L_lr - 1)
         t_rel = (t_hr - idx_i.float()).unsqueeze(-1)
         
         freq_exps = torch.arange(num_bands, device=x_lr.device, dtype=torch.float32)

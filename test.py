@@ -65,12 +65,13 @@ def evaluate_and_save(model_path, model_name, device):
     model.eval()
 
     # ---------------------------------------------------------
-    # PHASE 3: Mathematical Metrics (LSD & SSIM)
+    # PHASE 2: Mathematical Metrics (LSD & SSIM) - Det & Stoc
     # ---------------------------------------------------------
-    print(f"\n[Phase 2] Computing Structural Metrics (Stochastic)...")
+    print(f"\n[Phase 2] Computing Structural Metrics (Deterministic & Stochastic)...")
     torch.manual_seed(42) 
     
-    avg_lsd, avg_ssim = 0.0, 0.0
+    avg_lsd_det, avg_ssim_det = 0.0, 0.0
+    avg_lsd_stoc, avg_ssim_stoc = 0.0, 0.0
     avg_base_lsd, avg_base_ssim = 0.0, 0.0
 
     with torch.no_grad():
@@ -82,25 +83,38 @@ def evaluate_and_save(model_path, model_name, device):
             hr_wav = resample(hr_wav, high_sampling_rate, hsr_new)
             lr_wave_base = resample(lr_wav, low_sampling_rate, hsr_new)
             
-            # STOCHASTIC INFERENCE
-            pred, _ = model(lr_wav, scale=scale, infer_stoc=True)
+            # INFERENCE PASSES
+            pred_det, _ = model(lr_wav, scale=scale, infer_stoc=False)
+            pred_stoc, _ = model(lr_wav, scale=scale, infer_stoc=True)
             
-            min_len = min(pred.shape[-1], hr_wav.shape[-1])
-            pred, hr_wav = pred[..., :min_len], hr_wav[..., :min_len]
-            pred += lr_wave_base[..., :min_len]
-            
-            avg_lsd += log_spectral_distance(pred, hr_wav).item()
-            avg_ssim += compute_audio_ssim(pred, hr_wav, sample_rate=hsr_new)
-            avg_base_lsd += log_spectral_distance(lr_wave_base, hr_wav).item()
-            avg_base_ssim += compute_audio_ssim(lr_wave_base, hr_wav, sample_rate=hsr_new)
+            # ALIGN LENGTHS (Deterministic)
+            min_len_det = min(pred_det.shape[-1], hr_wav.shape[-1])
+            p_det = pred_det[..., :min_len_det] + lr_wave_base[..., :min_len_det]
+            h_det = hr_wav[..., :min_len_det]
+            b_det = lr_wave_base[..., :min_len_det]
+
+            # ALIGN LENGTHS (Stochastic)
+            min_len_stoc = min(pred_stoc.shape[-1], hr_wav.shape[-1])
+            p_stoc = pred_stoc[..., :min_len_stoc] + lr_wave_base[..., :min_len_stoc]
+            h_stoc = hr_wav[..., :min_len_stoc]
+
+            # METRICS COMPUTATION
+            avg_lsd_det += log_spectral_distance(p_det, h_det).item()
+            avg_ssim_det += compute_audio_ssim(p_det, h_det, sample_rate=hsr_new)
+
+            avg_lsd_stoc += log_spectral_distance(p_stoc, h_stoc).item()
+            avg_ssim_stoc += compute_audio_ssim(p_stoc, h_stoc, sample_rate=hsr_new)
+
+            avg_base_lsd += log_spectral_distance(b_det, h_det).item()
+            avg_base_ssim += compute_audio_ssim(b_det, h_det, sample_rate=hsr_new)
 
     num_batches = len(val_loader)
     print(f"\nPhase 2 Results for {model_name}:")
-    print(f"--> LSD:  {avg_lsd / num_batches:.4f}  |  (Base: {avg_base_lsd / num_batches:.4f})")
-    print(f"--> SSIM: {avg_ssim / num_batches:.4f}  |  (Base: {avg_base_ssim / num_batches:.4f})")
+    print(f"--> LSD  [Det]: {avg_lsd_det / num_batches:.4f}  |  [Stoc]: {avg_lsd_stoc / num_batches:.4f}  |  (Base: {avg_base_lsd / num_batches:.4f})")
+    print(f"--> SSIM [Det]: {avg_ssim_det / num_batches:.4f}  |  [Stoc]: {avg_ssim_stoc / num_batches:.4f}  |  (Base: {avg_base_ssim / num_batches:.4f})")
 
     # ---------------------------------------------------------
-    # PHASE 4: Full-Clip Artifacts & PESQ Eval
+    # PHASE 3: Full-Clip Artifacts & PESQ Eval
     # ---------------------------------------------------------
     print(f"\n[Phase 3] Evaluating PESQ & Generating Dual Artifacts...")
     
@@ -177,13 +191,8 @@ def main():
     os.makedirs('audio', exist_ok=True)
     os.makedirs('image', exist_ok=True)
     
-    best_ssim_path = os.path.join('models', 'lisa_best_model_ssim.pth')
+    # We only care about the best LSD model now
     best_lsd_path = os.path.join('models', 'lisa_best_model_lsd.pth')
-
-    if os.path.exists(best_ssim_path): 
-        evaluate_and_save(best_ssim_path, 'Best_SSIM_Model', device)
-    else:
-        print(f"Warning: Could not find {best_ssim_path}. Skipping.")
 
     if os.path.exists(best_lsd_path): 
         evaluate_and_save(best_lsd_path, 'Best_LSD_Model', device)
