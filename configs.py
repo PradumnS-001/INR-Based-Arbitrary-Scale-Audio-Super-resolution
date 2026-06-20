@@ -23,9 +23,9 @@ wdc = 1e-5
 scheduler_start = 0
 
 max_norm = 1
-l1_wt = 0.01
+l1_wt = 0.2
 dist_wt = 4
-mssl_wt = 3
+mssl_wt = 10
 log_loss_eps = 1e-3
 
 is_omega_trainable = False

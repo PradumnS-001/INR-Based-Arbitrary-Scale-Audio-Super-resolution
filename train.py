@@ -24,7 +24,7 @@ def calc_loss(
     
     waveloss = WaveLoss(eps=log_loss_eps).to(base.device)
     mssl = mssl_wt * (waveloss(predA,base,scale) + waveloss(predB,base,scale)) / 2
-    l1_anchor = l1_wt * F.l1_loss((predA+predB)/2,base)
+    l1_anchor = l1_wt * (F.l1_loss(predA,base) + F.l1_loss(predB,base)) / 2
     
     l1_repel = torch.tensor(0, device=base.device, dtype=torch.float32)
     if stochastic:
@@ -35,16 +35,19 @@ def calc_loss(
             
             magA = torch.stft(predA.squeeze(1).float(), n_fft, hop_length=hop, window=window.float(), return_complex=True).abs()
             magB = torch.stft(predB.squeeze(1).float(), n_fft, hop_length=hop, window=window.float(), return_complex=True).abs()
+            target_mag = torch.stft(base.squeeze(1).float(), n_fft, hop_length=hop, window=window.float(), return_complex=True).abs()
             
             cutoff_ratio = 1.0 / scale
             cutoff_bin = int(magA.shape[1] * cutoff_ratio)
             magB = magB[:, cutoff_bin:, :]
             magA = magA[:, cutoff_bin:, :]
+            target_mag = target_mag[:, cutoff_bin:, :]
+            energy_weights = torch.clamp(target_mag, min=1e-4, max=1.0).detach()
             
             log_magA = torch.log(magA + log_loss_eps)
             log_magB = torch.log(magB + log_loss_eps)
-            stft_diff = F.l1_loss(log_magA, log_magB)
-            l1_repel += dist_wt * torch.clamp(0.05 - stft_diff, min=0.0)
+            log_dist = torch.abs(log_magA - log_magB)
+            l1_repel += dist_wt * 0.04 * (torch.exp(-log_dist / 0.05) * energy_weights).mean()
             
         if (epoch+1): l1_repel *= max(0.25,ganin_scheduler(epoch))
     

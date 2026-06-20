@@ -8,7 +8,7 @@ def ganin_scheduler(epoch):
 
 class WaveLoss(nn.Module):
     
-    def __init__(self, n_ffts=[512, 256], eps:float = 1e-6):
+    def __init__(self, n_ffts=[1024, 512, 256], eps:float = 1e-6):
         super().__init__()
         self.n_ffts = n_ffts
         self.eps = eps
@@ -31,10 +31,12 @@ class WaveLoss(nn.Module):
             s_hat_abs = s_hat_abs[:, cutoff_bin:, :]
             s_abs = s_abs[:, cutoff_bin:, :]
             
-            diff_sq = (s_abs - s_hat_abs).pow(2).sum()
+            mag_diff = s_abs - s_hat_abs
+            diff_sq = (mag_diff).pow(2).sum()
             sc_loss = torch.sqrt(diff_sq + self.eps) / torch.norm(s_abs, p="fro").clamp(min=self.eps)
             
-            mag_loss = F.huber_loss(torch.log(s_hat_abs + self.eps), torch.log(s_abs + self.eps))
+            mag_diff = mag_diff.abs().pow(0.5).detach()
+            mag_loss = (F.huber_loss(torch.log(s_hat_abs + self.eps), torch.log(s_abs + self.eps), reduction='none') * mag_diff).mean()
             mssl_loss += (sc_loss + mag_loss)
         
         return mssl_loss
