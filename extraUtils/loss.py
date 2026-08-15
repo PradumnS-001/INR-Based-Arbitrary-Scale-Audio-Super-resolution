@@ -7,40 +7,45 @@ def ganin_scheduler(epoch):
     return torch.tanh(torch.tensor(epoch/2)).item()
 
 class WaveLoss(nn.Module):
-    
-    def __init__(self, n_ffts=[1024, 512, 256], eps:float = 1e-6):
+    def __init__(self, eps, pow_fac, n_ffts=[2048, 512, 128]):
         super().__init__()
         self.n_ffts = n_ffts
         self.eps = eps
+        self.windows = nn.ParameterDict({
+            str(n): nn.Parameter(torch.hann_window(n), requires_grad=False)
+            for n in n_ffts
+        })
+        self.pow_fac = pow_fac
 
-    def forward(self, x_hat: torch.Tensor, x: torch.Tensor, scale: float=1e4)->tuple[torch.Tensor]:
-        x = x.squeeze(1)
-        x_hat = x_hat.squeeze(1)
-        mssl_loss = 0
+    def forward(self, x_hat: torch.Tensor, x: torch.Tensor, scale: float) -> torch.Tensor:
+        if x.ndim == 3 and x.shape[1] == 1:
+            x = x.squeeze(1)
+            x_hat = x_hat.squeeze(1)
+        mssl_loss = 0.0
         
         for n in self.n_ffts:
             hop = n // 4
-            window = torch.hann_window(n, device=x.device)
+            window = self.windows[str(n)]
             
             s_hat_abs = torch.stft(x_hat.float(), n, hop_length=hop, window=window.float(), return_complex=True).abs()
             s_abs = torch.stft(x.float(), n, hop_length=hop, window=window.float(), return_complex=True).abs()
             
-            cutoff_ratio = 1.0 / scale
-            cutoff_bin = int(s_abs.shape[1] * cutoff_ratio)
+            total_bins = s_abs.shape[1]
+            cutoff_bin = int((total_bins - 1) / scale)
+            s_hat_high = s_hat_abs[:, cutoff_bin:, :]
+            s_abs_high = s_abs[:, cutoff_bin:, :]
             
-            s_hat_abs = s_hat_abs[:, cutoff_bin:, :]
-            s_abs = s_abs[:, cutoff_bin:, :]
+            mag_diff = s_abs_high - s_hat_high
+            sc_loss = torch.norm(mag_diff, p="fro") / torch.norm(s_abs_high, p="fro").clamp(min=self.eps)
             
-            mag_diff = s_abs - s_hat_abs
-            diff_sq = (mag_diff).pow(2).sum()
-            sc_loss = torch.sqrt(diff_sq + self.eps) / torch.norm(s_abs, p="fro").clamp(min=self.eps)
+            pow_s_hat = s_hat_high.clamp(self.eps).pow(self.pow_fac)
+            pow_s = s_abs_high.clamp(self.eps).pow(self.pow_fac)
+            mag_loss = F.mse_loss(pow_s_hat, pow_s)
             
-            mag_diff = mag_diff.abs().pow(0.5).detach()
-            mag_loss = (F.huber_loss(torch.log(s_hat_abs + self.eps), torch.log(s_abs + self.eps), reduction='none') * mag_diff).mean()
             mssl_loss += (sc_loss + mag_loss)
         
         return mssl_loss
-    
+        
 def log_spectral_distance(y_hat:torch.Tensor, y:torch.Tensor)->torch.Tensor:
     """
     Measures the log spectral distance

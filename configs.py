@@ -2,12 +2,11 @@ import numpy as np
 
 BASE_PATH = 'Data/VCTKCorpus'
 seed = 42
-actfe = actfd = actfs = 'elu'
+actfe = actfd = actfs = 'relu'
 
 low_sampling_rate = 8000
 high_sampling_rate = 24000
-val_scale = 2
-temperature = 0.7
+val_scale = 3
 
 limit = None
 clip_size_sec = 0.5
@@ -17,23 +16,21 @@ scale_res = 50
 
 lr = 1e-3
 epochs = 50
-step_size = 6
+step_size = 10
 gamma = 0.1
 wdc = 1e-5
 scheduler_start = 0
 
-max_norm = 1
-l1_wt = 0.2
-dist_wt = 4
-mssl_wt = 10
-log_loss_eps = 1e-3
+max_norm = 0.1
+l1_wt = 80
+mssl_wt = 5
+loss_eps = 1e-3
+loss_pow_fac = 0.5
+mdim = 128
+mdim1 = 96
+filters = 8
 
-is_omega_trainable = False
-omega = np.pi
-num_bands = 2
-mdim = 64
-
-num_blocks = 5
-noisy_start = 2
+num_blocks = 4
+noisy_start = 4
 drop_prob = 0.125
 do_perturbation = True
