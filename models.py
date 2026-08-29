@@ -39,7 +39,7 @@ class LISA(nn.Module):
         t_hr = t_hr.unsqueeze(0).repeat(B, 1)
         
         if self.training:
-            eta = torch.randn_like(t_hr) * 0.4
+            eta = torch.randn_like(t_hr) * 0.5
             t_select = t_hr + eta
         else:
             t_select = t_hr
@@ -63,4 +63,4 @@ class LISA(nn.Module):
         feat = torch.cat([t_rel, z_triplet], dim=-1)
         out = self.decoder(feat)
         
-        return out.transpose(1, 2)
+        return out.transpose(1, 2).contiguous()

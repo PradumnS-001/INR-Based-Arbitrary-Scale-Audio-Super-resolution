@@ -37,7 +37,7 @@ def main():
         for lr_wav, hr_wav in pbar:
             
             lr_wav:torch.Tensor = lr_wav.to(device)
-            scale = np.random.randint(50, int(50*high_sampling_rate/low_sampling_rate + 1)) / 50
+            scale = np.random.randint(scale_res, int(scale_res*high_sampling_rate/low_sampling_rate + 1)) / scale_res
             hsr_new = int(low_sampling_rate * scale)
             with torch.no_grad(): hr_wav = resample(hr_wav, high_sampling_rate, hsr_new)
             

@@ -2,12 +2,15 @@ import torch
 from torch import nn
 import torch.nn.functional as F 
 
+def ganin_scheduler(epoch):
+    return torch.tanh(torch.tensor(epoch/2)).item()
+
 class MultiScaleSpectralLoss(nn.Module):
     """
     Implements the Multi-resolution STFT loss.
-    Consists of Spectral Convergence (L2) and Log STFT Magnitude (L1) losses.
+    Consists of Spectral Convergence (L2) and Power (Huber) losses.
     """
-    def __init__(self, n_ffts=[2048, 512]):
+    def __init__(self, n_ffts=[2048, 1024, 512, 256, 128]):
         super().__init__()
         self.n_ffts = n_ffts
 
@@ -25,7 +28,7 @@ class MultiScaleSpectralLoss(nn.Module):
             
             sc_loss = torch.norm(s - s_hat, p="fro") / torch.norm(s, p="fro").clamp(min=1e-7)
             
-            mag_loss = F.l1_loss(torch.log(s_hat + 1e-5), torch.log(s + 1e-5))
+            mag_loss = F.huber_loss(torch.sqrt(s_hat + 1e-5), torch.sqrt(s + 1e-5), delta=1)
             
             total_loss += (sc_loss + mag_loss)
             
