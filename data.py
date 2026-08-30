@@ -1,6 +1,6 @@
 import torch
 from torch.utils.data import Dataset, random_split, DataLoader
-from torchaudio.functional import resample
+import torchaudio.transforms as T
 import soundfile as sf
 import numpy as np
 from extraUtils.misc import get_leaf_files
@@ -31,6 +31,10 @@ class AudioCorpus(Dataset):
         self.hsr = hsr
         self.trunc = trunc
         
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.resample_down = T.Resample(orig_freq=self.hsr, new_freq=self.lsr).to(self.device)
+        self.resample_to_hsr = {}
+        
     def __len__(self):
         return len(self.files)
     
@@ -51,14 +55,20 @@ class AudioCorpus(Dataset):
             else:
                 hrw = torch.nn.functional.pad(hrw, (0, orig_segment_size - hrw.shape[-1]))
         
-        if sr != self.hsr:
-            hrw = resample(hrw, sr, self.hsr)
-        lrw = resample(hrw, self.hsr, self.lsr)
+        hrw = hrw.to(self.device)
         
-        return lrw, hrw
+        if sr != self.hsr:
+            if sr not in self.resample_to_hsr:
+                self.resample_to_hsr[sr] = T.Resample(orig_freq=sr, new_freq=self.hsr).to(self.device)
+            hrw = self.resample_to_hsr[sr](hrw)
+            
+        lrw = self.resample_down(hrw)
+        
+        return lrw.cpu(), hrw.cpu()
+    
     
 dataset = AudioCorpus()
-tr_len = int(0.9 * len(dataset))
+tr_len = int(0.8 * len(dataset))
 val_len = len(dataset) - tr_len
 tr_set, val_set = random_split(dataset, [tr_len, val_len], generator=generator)
 
@@ -90,4 +100,4 @@ def calc_opcs(data: AudioCorpus) -> torch.Tensor:
     true_std = torch.tensor(true_variance).sqrt()
     true_mean = total_sum / total_elements
     
-    return true_std, true_mean
+    return true_mean, true_std

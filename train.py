@@ -5,6 +5,7 @@ from tqdm import tqdm
 import numpy as np
 import gc
 import os
+import torch.multiprocessing as mp
 
 from data import tr_loader, val_loader
 from configs import *
@@ -110,4 +111,5 @@ def main():
             torch.save(model.state_dict(), os.path.join('models',f"lisa_checkpoint_epoch_{epoch}.pt"))
         
 if __name__ == "__main__":
+    mp.set_start_method('spawn', force=True)
     main()

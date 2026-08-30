@@ -72,3 +72,17 @@ class ModelEMA:
     @torch.no_grad()
     def apply_shadow(self, model):
         model.load_state_dict(self.shadow, strict=True)
+        
+class Swiglu(nn.Module):
+    """
+    Input: (...,Din)
+    Output: (...,Dout)
+    """
+    def __init__(self, in_features, out_features,*args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.proj = nn.Linear(in_features=in_features,out_features=out_features*2)
+        
+    def forward(self, x):
+        x = self.proj(x)
+        gate, info = x.chunk(2, dim=-1)
+        return info * F.silu(gate)

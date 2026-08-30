@@ -6,11 +6,9 @@ def get_leaf_files(
     ender:str|tuple[str]='', 
     starter:str|tuple[str]='', 
     container:str='')->tuple[int,list[str]]:
-    
     """
     Returns all the leaf-files in a folder
     """
-    
     path = rf'{path}'
     files = []
     with os.scandir(path=path) as entries:

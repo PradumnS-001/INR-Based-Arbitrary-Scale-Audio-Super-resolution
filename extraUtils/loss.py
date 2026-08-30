@@ -5,12 +5,15 @@ import torch.nn.functional as F
 def ganin_scheduler(epoch):
     return torch.tanh(torch.tensor(epoch/2)).item()
 
+def kullback_liebler_divergence(mean:torch.Tensor, std:torch.Tensor):
+    return (-0.5 * (1 + torch.log(std**2) - mean**2 - std**2)).mean()
+
 class MultiScaleSpectralLoss(nn.Module):
     """
     Implements the Multi-resolution STFT loss.
     Consists of Spectral Convergence (L2) and Power (Huber) losses.
     """
-    def __init__(self, n_ffts=[2048, 1024, 512, 256, 128]):
+    def __init__(self, n_ffts=[2048, 512, 128]):
         super().__init__()
         self.n_ffts = n_ffts
 
@@ -47,52 +50,3 @@ def log_spectral_distance(y_hat:torch.Tensor, y:torch.Tensor)->torch.Tensor:
     
     dist = torch.sqrt(torch.mean((log_s - log_s_hat)**2, dim=-2))
     return torch.mean(dist)
-
-def balance_grad_norm(
-    model:nn.Module,
-    losses:list[torch.Tensor],
-    weights:list[float | None] | None=None,
-    norms:float | list[float | None] | None=None,
-    scalar:float=1
-    )->float:
-    """
-    Balances, optionally clips, and accumulates gradients for multiple losses.
-    If `norms` is a list/None, computes and clips gradients in a vacuum before weighting and summing.
-    If `norms` is a float, weights and sums losses first, then computes and globally clips the total gradient.
-    Note: `losses`, `weights` (if provided), and `norms` (if list) must be of the exact same length.
-    """
-    
-    if weights is None:
-        weights = [1] * len(losses)
-    weights = [abs(i * scalar) if i is not None else 0 for i in weights]
-    
-    if not isinstance(norms, float):
-        
-        params = list(model.parameters())
-        accumulated_grads = [None] * len(params)
-        
-        for i, loss in enumerate(losses):
-            
-            model.zero_grad(set_to_none=True)
-            loss.backward(retain_graph=(i < len(losses) - 1))
-            
-            if norms is not None and i < len(norms) and norms[i] is not None:
-                torch.nn.utils.clip_grad_norm_(parameters=params, max_norm=norms[i])
-            
-            with torch.no_grad():
-                for idx, param in enumerate(params):
-                    if param.grad is not None:
-                        if accumulated_grads[idx] is None: accumulated_grads[idx] = param.grad.clone().mul_(weights[i])
-                        else: accumulated_grads[idx].add_(param.grad, alpha=weights[i])
-                    
-        for p, g in zip(params, accumulated_grads):
-            if g is not None:
-                p.grad = g
-                
-    else:
-        
-        total_loss = sum([i * w for i, w in zip(losses, weights)])
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(parameters=model.parameters(), max_norm=norms)
-        
-    return sum([float(i.item() * w) for i, w in zip(losses, weights)])
