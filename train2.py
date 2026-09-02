@@ -82,10 +82,13 @@ def main():
             hr_wav_3x = hr_wav_3x.to(device)
 
             with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                
                 mu, std = encoder(lr_wav)
-                z = mu + torch.randn_like(std) * std
-                beta = min(1, global_step / 2000) * 0.05
-                loss_kld = beta*(kullback_liebler_divergence(mu, std).clamp(min=0.5)) / update_step
+                B, D, _ = std.shape
+                eps = torch.randn(B, D, 1).to(device)
+                z = mu + eps * std
+                beta = min(1, global_step / beta_steps) * kld_wt
+                loss_kld = beta*(kullback_liebler_divergence(mu, std).clamp(min=min_kld)) / update_step
 
             loss_kld.backward(retain_graph=True)
 
@@ -160,8 +163,6 @@ def main():
                 ema.update(decoder)
                 writer.add_scalar('Params/Ganin_Factor', ganin_factor, global_step)
                 global_step += 1
-                
-                use_adv = random.random() < thershold
 
             epoch_loss += balanced_loss.item()
             pbar.set_postfix({"G_loss": balanced_loss.item()})
@@ -169,6 +170,8 @@ def main():
             del hr_arb, hat_x_arb, active_losses, active_outputs, balanced_loss, loss_kld, mu, std, z
             if use_adv:
                 del hr_fixed, hat_x_fixed, logits_real, logits_fake, fmaps_real, fmaps_fake, loss_hinge, loss_fm, loss_D
+                
+            if (step + 1) % update_step == 0 or (step + 1) == len(tr_loader): use_adv = random.random() < thershold
             torch.cuda.empty_cache()
 
         scheduler_G.step()

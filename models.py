@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from extraUtils.layer import getActivation, Swiglu
+from extraUtils.layer import getActivation, Swiglu, WeightNormLinear
 from configs import *
 import math
 
@@ -9,68 +9,36 @@ class Encoder(nn.Module):
     def __init__(self):
         super().__init__()
         
-        self.trunc = nn.Sequential(
-            nn.Conv1d(1, 16, kernel_size=7, padding=3),
+        self.mean_head = nn.Sequential(
+            nn.Conv1d(1, 16, kernel_size=5, padding=2),
             getActivation(actfe),
             nn.Conv1d(16, 32, kernel_size=3, padding=1),
             getActivation(actfe),
             nn.Conv1d(32, 64, kernel_size=3, padding=1),
-            getActivation(actfe))
-        
-        self.mean_head = nn.Sequential(
+            getActivation(actfe),
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
             getActivation(actfe),
             nn.Conv1d(64, encoder_dim, kernel_size=1)
         )
+        
         self.std_head = nn.Sequential(
+            nn.Conv1d(1, 16, kernel_size=5, padding=2),
+            getActivation(actfe),
+            nn.Conv1d(16, 32, kernel_size=3, padding=1),
+            getActivation(actfe),
+            nn.Conv1d(32, 64, kernel_size=3, padding=1),
+            getActivation(actfe),
             nn.Conv1d(64, 64, kernel_size=3, padding=1),
             getActivation(actfe),
             nn.Conv1d(64, encoder_dim, kernel_size=1)
         )
         
     def forward(self, x):
-        x = self.trunc(x)
+        
         mean = self.mean_head(x)
-        std = torch.exp(0.5*(self.std_head(x).clamp(min=-8,max=8)))
+        std = torch.exp(8.0 * F.softsign(self.std_head(x/8)))
         return mean, std
     
-class ConvolutionalDecoder(nn.Module):
-    def __init__(self, mean=0.0, std=1):
-        super().__init__()
-        
-        self.register_buffer('mean_data', torch.tensor(mean))
-        self.register_buffer('std_data', torch.tensor(std))
-        
-        self.trunc = nn.Sequential(
-            nn.ConvTranspose1d(in_channels=encoder_dim, out_channels=64,kernel_size=1, padding=0),
-            getActivation(actfdc),
-            nn.ConvTranspose1d(in_channels=64, out_channels=64,kernel_size=3, padding=1),
-            getActivation(actfdc),
-            nn.ConvTranspose1d(in_channels=64, out_channels=32,kernel_size=3, padding=1),
-            getActivation(actfdc),
-            nn.ConvTranspose1d(in_channels=32, out_channels=16,kernel_size=3, padding=1),
-            getActivation(actfdc),
-            nn.ConvTranspose1d(in_channels=16, out_channels=1,kernel_size=7, padding=3)
-        )
-        
-    def forward(self, x):
-        return self.trunc(x) * self.std_data + self.mean_data
-    
-class DecoderBlock(nn.Module):
-    
-    def __init__(self, in_features, out_features,*args, **kwargs):
-        super().__init__(*args, **kwargs)
-        
-        self.act1 = nn.RMSNorm(in_features)
-        self.act2 = Swiglu(in_features=in_features,out_features=out_features)
-        self.proj = nn.Linear(in_features=out_features,out_features=out_features)
-        
-    def forward(self, x):
-        
-        skip = x
-        y = self.proj(self.act2(self.act1(x)))
-        return skip + y
-     
 class INRDecoder(nn.Module):
     
     def __init__(self, mean=0.0, std=1, *args, **kwargs):
@@ -80,14 +48,25 @@ class INRDecoder(nn.Module):
         self.register_buffer('std_data', torch.tensor(std))
         
         self.decoder = nn.Sequential(
-            nn.Linear(freq_bands * 2 + 2 + encoder_dim * 3, 196),
-            nn.SiLU(),
-            nn.Linear(196, 196),
-            DecoderBlock(196, 196),
-            DecoderBlock(196, 196),
-            DecoderBlock(196, 196),
-            nn.SiLU(),
-            nn.Linear(196, 1)
+            nn.Linear(freq_bands * 2 + 2 + encoder_dim * 3, mdim),
+            getActivation(act=actfdi),
+            
+            nn.Linear(mdim, mdim),
+            getActivation(act=actfdi),
+            
+            nn.Linear(mdim, mdim),
+            getActivation(act=actfdi),
+            
+            nn.Linear(mdim, mdim),
+            getActivation(act=actfdi),
+            
+            nn.Linear(mdim, mdim),
+            getActivation(act=actfdi),
+            
+            nn.Linear(mdim, mdim),
+            getActivation(act=actfdi),
+            
+            nn.Linear(mdim, 1)
         )
         
     def forward(self, z:torch.Tensor, scale):
@@ -131,3 +110,52 @@ class INRDecoder(nn.Module):
         out = self.decoder(feat)
         
         return out.transpose(1, 2).contiguous() * self.std_data + self.mean_data
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+class ConvolutionalDecoder(nn.Module):
+    def __init__(self, mean=0.0, std=1):
+        super().__init__()
+        
+        self.register_buffer('mean_data', torch.tensor(mean))
+        self.register_buffer('std_data', torch.tensor(std))
+        
+        self.trunc = nn.Sequential(
+            nn.ConvTranspose1d(in_channels=encoder_dim, out_channels=64,kernel_size=1, padding=0),
+            getActivation(actfdc),
+            nn.ConvTranspose1d(in_channels=64, out_channels=64,kernel_size=3, padding=1),
+            getActivation(actfdc),
+            nn.ConvTranspose1d(in_channels=64, out_channels=32,kernel_size=3, padding=1),
+            getActivation(actfdc),
+            nn.ConvTranspose1d(in_channels=32, out_channels=16,kernel_size=3, padding=1),
+            getActivation(actfdc),
+            nn.ConvTranspose1d(in_channels=16, out_channels=1,kernel_size=7, padding=3)
+        )
+        
+    def forward(self, x):
+        return self.trunc(x) * self.std_data + self.mean_data
+    
+class DecoderBlock(nn.Module):
+    
+    def __init__(self, in_features, out_features,*args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        self.act1 = nn.RMSNorm(in_features)
+        self.act2 = Swiglu(in_features=in_features,out_features=out_features)
+        self.proj = nn.Linear(in_features=out_features,out_features=out_features)
+        
+    def forward(self, x):
+        
+        skip = x
+        y = self.proj(self.act2(self.act1(x)))
+        return skip + y
