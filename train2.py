@@ -34,7 +34,7 @@ def main():
     encoder = Encoder().to(device)
     mean_data, std_data = calc_opcs(tr_loader)
     std_data = std_data.item()
-    huber_delta = 0.05 * std_data if std_data > 0 else 1.0
+    huber_delta = 0.01 * std_data if std_data > 0 else 1.0
     decoder = INRDecoder(mean=mean_data, std=std_data).to(device)
     
     print(mean_data, std_data)
@@ -52,7 +52,7 @@ def main():
                                           win_lengths=[3072, 768, 192]).to(device)
 
     opt_G = torch.optim.Adam(itertools.chain(encoder.parameters(), decoder.parameters()), lr=lr, betas=(0.75, 0.99))
-    opt_D = torch.optim.Adam(itertools.chain(disc_1x.parameters(), disc_2x.parameters(), disc_3x.parameters()), lr=lr, betas=(0.5, 0.9))
+    opt_D = torch.optim.Adam(itertools.chain(disc_1x.parameters(), disc_2x.parameters(), disc_3x.parameters()), lr=lr*2, betas=(0.5, 0.9))
 
     scheduler_G = torch.optim.lr_scheduler.StepLR(opt_G, step_size=step_size, gamma=gamma)
     scheduler_D = torch.optim.lr_scheduler.StepLR(opt_D, step_size=step_size, gamma=gamma)
@@ -102,8 +102,8 @@ def main():
                 min_len_arb = min(hat_x_arb.shape[-1], hr_arb.shape[-1])
                 hat_x_arb, hr_arb = hat_x_arb[..., :min_len_arb], hr_arb[..., :min_len_arb]
 
-                loss_mssl = mssl(hat_x_arb, hr_arb) / update_step
-                loss_huber = F.huber_loss(hat_x_arb, hr_arb, delta=huber_delta) / update_step
+                loss_mssl = mssl(hat_x_arb, hr_arb)
+                loss_huber = F.huber_loss(hat_x_arb, hr_arb, delta=huber_delta)
 
             active_losses = {'mssl': loss_mssl, 'huber': loss_huber}
             active_outputs = {'mssl': hat_x_arb, 'huber': hat_x_arb}
@@ -127,15 +127,15 @@ def main():
                     logits_fake, fmaps_fake = disc(hat_x_fixed)
 
                     loss_hinge, loss_fm = generator_adv_losses(logits_fake, fmaps_real, fmaps_fake)
-                    loss_hinge = loss_hinge / update_step
-                    loss_fm = loss_fm / update_step
+                    loss_hinge = loss_hinge
+                    loss_fm = loss_fm
 
                 active_losses[f'hinge_{tag}'] = loss_hinge
                 active_losses[f'fm_{tag}'] = loss_fm
                 active_outputs[f'hinge_{tag}'] = hat_x_fixed
                 active_outputs[f'fm_{tag}'] = hat_x_fixed
 
-            balanced_loss = balancer.get_balanced_loss(active_losses, active_outputs, ganin_factor)
+            balanced_loss = balancer.get_balanced_loss(active_losses, active_outputs, ganin_factor) / update_step
             balanced_loss.backward()
 
             if use_adv:

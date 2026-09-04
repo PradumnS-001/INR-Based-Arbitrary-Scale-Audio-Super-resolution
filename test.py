@@ -7,7 +7,7 @@ from torchaudio.functional import resample
 from tqdm import tqdm
 import numpy as np
 
-from data import val_loader, val12_loader
+from data import val_loader, val12_loader, tr_loader, calc_opcs
 from configs import *
 from models import Encoder, INRDecoder
 from extraUtils.loss import log_spectral_distance
@@ -60,6 +60,10 @@ def evaluate_and_save(model_path, model_name, device, num_runs=10):
         dummy_decoder.load_state_dict(checkpoint['decoder'])
         
     decoder = dummy_decoder
+    mean_data, std_data = calc_opcs(tr_loader)
+    mean_data = torch.tensor(mean_data)
+    decoder.mean_data = mean_data
+    decoder.std_data = std_data
     encoder.eval()
     decoder.eval()
 
@@ -84,7 +88,12 @@ def evaluate_and_save(model_path, model_name, device, num_runs=10):
             # Execute 10 stochastic samples per batch to find the Expected Value
             for _ in range(num_runs):
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                    z = mu + torch.randn_like(std) * std
+                    if len(std.shape) == 3: B, D, _ = std.shape
+                    else: 
+                        D, _ = std.shape
+                        B = 1
+                    eps = torch.randn(B,D,1).to(device)
+                    z = mu + eps * std
                     pred = decoder(z, scale=val_scale)
                     
                 min_len = min(pred.shape[-1], hr_wav.shape[-1])
@@ -128,7 +137,12 @@ def evaluate_and_save(model_path, model_name, device, num_runs=10):
             # 10 stochastic runs for artifact saving
             for _ in range(num_runs):
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                    z = mu + torch.randn_like(std) * std
+                    if len(std.shape) == 3: B, D, _ = std.shape
+                    else: 
+                        D, _ = std.shape
+                        B = 1
+                    eps = torch.randn(B,D,1).to(device)
+                    z = mu + eps * std
                     pred = decoder(z, scale=val_scale)
                     
                 min_len = min(pred.shape[-1], hr_wav.shape[-1])

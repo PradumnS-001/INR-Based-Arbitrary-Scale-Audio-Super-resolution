@@ -31,7 +31,7 @@ class MultiScaleSpectralLoss(nn.Module):
             
             sc_loss = torch.norm(s - s_hat, p="fro") / torch.norm(s, p="fro").clamp(min=1e-7)
             
-            mag_loss = F.huber_loss(torch.sqrt(s_hat + 1e-5), torch.sqrt(s + 1e-5), delta=1)
+            mag_loss = F.huber_loss(torch.sqrt(s_hat + 1e-5), torch.sqrt(s + 1e-5), delta=0.25)
             
             total_loss += (sc_loss + mag_loss)
             

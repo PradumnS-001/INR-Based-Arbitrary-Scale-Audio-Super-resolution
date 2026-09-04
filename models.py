@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from extraUtils.layer import getActivation, Swiglu, WeightNormLinear
+from extraUtils.layer import getActivation, Swiglu
 from configs import *
 import math
 
@@ -10,25 +10,25 @@ class Encoder(nn.Module):
         super().__init__()
         
         self.mean_head = nn.Sequential(
-            nn.Conv1d(1, 16, kernel_size=5, padding=2),
+            nn.Conv1d(1, 16, kernel_size=7, padding=3),
             getActivation(actfe),
             nn.Conv1d(16, 32, kernel_size=3, padding=1),
             getActivation(actfe),
             nn.Conv1d(32, 64, kernel_size=3, padding=1),
             getActivation(actfe),
-            nn.Conv1d(64, 64, kernel_size=3, padding=1),
+            nn.Conv1d(64, 64, kernel_size=1),
             getActivation(actfe),
             nn.Conv1d(64, encoder_dim, kernel_size=1)
         )
         
         self.std_head = nn.Sequential(
-            nn.Conv1d(1, 16, kernel_size=5, padding=2),
+            nn.Conv1d(1, 16, kernel_size=7, padding=3),
             getActivation(actfe),
             nn.Conv1d(16, 32, kernel_size=3, padding=1),
             getActivation(actfe),
             nn.Conv1d(32, 64, kernel_size=3, padding=1),
             getActivation(actfe),
-            nn.Conv1d(64, 64, kernel_size=3, padding=1),
+            nn.Conv1d(64, 64, kernel_size=1),
             getActivation(actfe),
             nn.Conv1d(64, encoder_dim, kernel_size=1)
         )
@@ -36,8 +36,23 @@ class Encoder(nn.Module):
     def forward(self, x):
         
         mean = self.mean_head(x)
-        std = torch.exp(8.0 * F.softsign(self.std_head(x/8)))
+        std = torch.exp(8.0 * F.softsign(self.std_head(x/4)))
         return mean, std
+    
+class SkipBlock(nn.Module):
+    
+    def __init__(self, hdim,*args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        self.block = nn.Sequential(
+            getActivation(act=actfdi),   
+            nn.Linear(hdim, hdim),
+            getActivation(act=actfdi),
+            nn.Linear(hdim, hdim)
+        )
+        
+    def forward(self, x):
+        return self.block(x)
     
 class INRDecoder(nn.Module):
     
@@ -49,24 +64,16 @@ class INRDecoder(nn.Module):
         
         self.decoder = nn.Sequential(
             nn.Linear(freq_bands * 2 + 2 + encoder_dim * 3, mdim),
-            getActivation(act=actfdi),
+            # getActivation(act=actfdi),
+            # nn.Linear(mdim, mdim),
             
-            nn.Linear(mdim, mdim),
-            getActivation(act=actfdi),
+            SkipBlock(mdim),
+            SkipBlock(mdim),
             
-            nn.Linear(mdim, mdim),
             getActivation(act=actfdi),
-            
-            nn.Linear(mdim, mdim),
-            getActivation(act=actfdi),
-            
-            nn.Linear(mdim, mdim),
-            getActivation(act=actfdi),
-            
-            nn.Linear(mdim, mdim),
-            getActivation(act=actfdi),
-            
-            nn.Linear(mdim, 1)
+            nn.Linear(mdim, mdim//2),
+            getActivation(actfdi),
+            nn.Linear(mdim//2, 1)
         )
         
     def forward(self, z:torch.Tensor, scale):
