@@ -27,7 +27,7 @@ share/python-wheels/
 MANIFEST
 runs/
 
-playground.ipynb
+modeller.ipynb
 models/
 image/
 audio/
