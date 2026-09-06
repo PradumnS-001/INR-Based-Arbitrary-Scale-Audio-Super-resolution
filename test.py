@@ -12,47 +12,51 @@ from configs import *
 from models import Encoder, INRDecoder
 from extraUtils.loss import log_spectral_distance
 from torchmetrics.audio import SignalNoiseRatio
+from evaluation import Evaluator
 
-try:
-    from torchmetrics.audio.pesq import PerceptualEvaluationSpeechQuality
-except ImportError:
-    raise ImportError("Please install PESQ support: pip install pesq torchmetrics[audio]")
-
-def plot_mel_spectrogram(y_true, y_pred, sr, save_path):
-    mel_transform = torchaudio.transforms.MelSpectrogram(sample_rate=sr, n_mels=80, n_fft=1024)
+def plot_mel_spectrogram(y_lr, y_true, y_mean, y_sample, lr_sr, hr_sr, save_path):
+    mel_hr = torchaudio.transforms.MelSpectrogram(sample_rate=hr_sr, n_mels=80, n_fft=1024)
+    mel_lr = torchaudio.transforms.MelSpectrogram(sample_rate=lr_sr, n_mels=80, n_fft=1024)
     db_transform = torchaudio.transforms.AmplitudeToDB(top_db=80)
 
-    mel_true = db_transform(mel_transform(y_true.cpu())).squeeze().numpy()
-    mel_pred = db_transform(mel_transform(y_pred.cpu())).squeeze().numpy()
+    mel_l = db_transform(mel_lr(y_lr.cpu())).squeeze().numpy()
+    mel_t = db_transform(mel_hr(y_true.cpu())).squeeze().numpy()
+    mel_m = db_transform(mel_hr(y_mean.cpu())).squeeze().numpy()
+    mel_s = db_transform(mel_hr(y_sample.cpu())).squeeze().numpy()
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    im1 = axes[0].imshow(mel_true, aspect='auto', origin='lower', cmap='viridis')
-    axes[0].set_title('Ground Truth Mel Spectrogram')
+    fig, axes = plt.subplots(1, 4, figsize=(24, 5))
+    
+    im0 = axes[0].imshow(mel_l, aspect='auto', origin='lower', cmap='viridis')
+    axes[0].set_title('Low Res Input (8kHz)')
     axes[0].set_ylabel('Mel bins')
     axes[0].set_xlabel('Frames')
-    fig.colorbar(im1, ax=axes[0], format="%+2.0f dB")
-
-    im2 = axes[1].imshow(mel_pred, aspect='auto', origin='lower', cmap='viridis')
-    axes[1].set_title('Predicted (LISA) Mel Spectrogram')
+    
+    im1 = axes[1].imshow(mel_t, aspect='auto', origin='lower', cmap='viridis')
+    axes[1].set_title('Ground Truth (Target HR)')
     axes[1].set_xlabel('Frames')
-    fig.colorbar(im2, ax=axes[1], format="%+2.0f dB")
+    
+    im2 = axes[2].imshow(mel_m, aspect='auto', origin='lower', cmap='viridis')
+    axes[2].set_title('Deterministic Mean (z = mu)')
+    axes[2].set_xlabel('Frames')
+    
+    im3 = axes[3].imshow(mel_s, aspect='auto', origin='lower', cmap='viridis')
+    axes[3].set_title('Stochastic Sample (z = mu + eps*std)')
+    axes[3].set_xlabel('Frames')
 
+    fig.colorbar(im3, ax=axes.ravel().tolist(), format="%+2.0f dB")
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close()
 
 def evaluate_and_save(model_path, model_name, device, num_runs=10):
-    print(f"\n" + "="*45)
-    print(f"--- Evaluating {model_name} ({num_runs}-Run Expected Value) ---")
-    print("="*45)
+    print(f"\n" + "="*55)
+    print(f"--- Evaluating {model_name} ---")
+    print("="*55)
     
-    # Load state dict strictly to map the mean/std buffers correctly
     checkpoint = torch.load(model_path, map_location=device)
-    
     encoder = Encoder().to(device)
     encoder.load_state_dict(checkpoint['encoder'])
     
-    # Temporarily init decoder to get structure, then load buffers
     dummy_decoder = INRDecoder().to(device) 
     if 'ema' in checkpoint:
         dummy_decoder.load_state_dict(checkpoint['ema'])
@@ -61,66 +65,76 @@ def evaluate_and_save(model_path, model_name, device, num_runs=10):
         
     decoder = dummy_decoder
     mean_data, std_data = calc_opcs(tr_loader)
-    mean_data = torch.tensor(mean_data)
-    decoder.mean_data = mean_data
-    decoder.std_data = std_data
+    decoder.mean_data = torch.tensor(mean_data, device=device)
+    decoder.std_data = torch.tensor(std_data, device=device)
+    
     encoder.eval()
     decoder.eval()
 
     snr_metric = SignalNoiseRatio().to(device)
+    evaluator = Evaluator()
     
-    print(f"\n[Phase 1] Evaluating Standard Val Set...")
+    print(f"\n[Phase 1] Evaluating Regression to Mean & Standard Val Set...")
     snr_metric.reset()
+    total_mean_lsd = 0.0
     total_expected_lsd = 0.0
+    total_stochastic_variance = 0.0
 
     with torch.no_grad():
         for lr_wav, hr_wav in tqdm(val_loader, desc=f"Standard Val"):
             lr_wav, hr_wav = lr_wav.to(device), hr_wav.to(device)
             hsr_new = int(low_sampling_rate * val_scale)
-            hr_wav = resample(hr_wav, high_sampling_rate, hsr_new)
-            hr_wav = hr_wav.float()
+            hr_wav = resample(hr_wav, high_sampling_rate, hsr_new).float()
             
             with torch.autocast(device_type=device, dtype=torch.bfloat16):
                 mu, std = encoder(lr_wav)
+                
+                # 1. Deterministic Prediction (Mean)
+                pred_mean = decoder(mu, scale=val_scale)
+                min_len = min(pred_mean.shape[-1], hr_wav.shape[-1])
+                pred_mean = pred_mean[..., :min_len].float()
+                total_mean_lsd += log_spectral_distance(pred_mean, hr_wav[..., :min_len]).item()
             
             batch_avg_lsd = 0.0
+            stochastic_preds = []
             
-            # Execute 10 stochastic samples per batch to find the Expected Value
+            # 2. Stochastic Predictions (Variance Testing)
             for _ in range(num_runs):
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                    if len(std.shape) == 3: B, D, _ = std.shape
-                    else: 
-                        D, _ = std.shape
-                        B = 1
-                    eps = torch.randn(B,D,1).to(device)
+                    B, D, _ = std.shape if len(std.shape) == 3 else (1, std.shape[0], std.shape[1])
+                    eps = torch.randn(B, D, 1).to(device)
                     z = mu + eps * std
-                    pred = decoder(z, scale=val_scale)
+                    pred_sample = decoder(z, scale=val_scale)
                     
-                min_len = min(pred.shape[-1], hr_wav.shape[-1])
-                pred = pred[..., :min_len].float()
+                pred_sample = pred_sample[..., :min_len].float()
+                stochastic_preds.append(pred_sample)
+                batch_avg_lsd += log_spectral_distance(pred_sample, hr_wav[..., :min_len]).item()
                 
-                batch_avg_lsd += log_spectral_distance(pred, hr_wav[..., :min_len]).item()
-                
-                if _ == 0: # Only accumulate SNR for the first run to save computation
-                    snr_metric(pred, hr_wav[..., :min_len])
+                if _ == 0: 
+                    snr_metric(pred_sample, hr_wav[..., :min_len])
 
+            # Measure variance across the 10 stochastic runs per sample
+            stacked_preds = torch.stack(stochastic_preds, dim=0) # [10, B, 1, L]
+            pixel_variance = torch.var(stacked_preds, dim=0).mean().item()
+            total_stochastic_variance += pixel_variance
+            
             total_expected_lsd += (batch_avg_lsd / num_runs)
 
-    final_snr_standard = snr_metric.compute().item()
-    final_lsd_standard = total_expected_lsd / len(val_loader)
-    
+    num_batches = len(val_loader)
     print(f"\nPhase 1 Results for {model_name}:")
-    print(f"Standard Val SNR: {final_snr_standard:.2f} dB")
-    print(f"Standard Val Expected LSD: {final_lsd_standard:.4f}")
+    print(f"Standard Val SNR: {snr_metric.compute().item():.2f} dB")
+    print(f"Deterministic (Mean) LSD: {total_mean_lsd / num_batches:.4f}")
+    print(f"Stochastic Expected LSD: {total_expected_lsd / num_batches:.4f}")
+    print(f"Regression Variance Test: {total_stochastic_variance / num_batches:.8f}")
+    if (total_stochastic_variance / num_batches) < 1e-5:
+        print(">>> WARNING: Variance is near zero. The VAE has suffered posterior collapse and is regressing to the mean.")
 
-    print(f"\n[Phase 2] Evaluating 12 Full-Length Samples & Saving Artifacts...")
+    print(f"\n[Phase 2] Generating 12 Full-Length Samples & Saving Artifacts...")
     snr_metric.reset()
-    pesq_metric = PerceptualEvaluationSpeechQuality(fs=16000, mode='wb').to(device)
-    pesq_metric.reset()
     
     total_12_expected_lsd = 0.0
-    saved_audio_count = 0
-    saved_img_count = 0
+    visqol_scores = []
+    pesq_scores = []
 
     with torch.no_grad():
         for idx, (lr_wav, hr_wav) in enumerate(tqdm(val12_loader, desc=f"Full-Length 12")):
@@ -130,72 +144,56 @@ def evaluate_and_save(model_path, model_name, device, num_runs=10):
             
             with torch.autocast(device_type=device, dtype=torch.bfloat16):
                 mu, std = encoder(lr_wav)
-            
-            run_lsds = []
-            run_preds = []
-            
-            # 10 stochastic runs for artifact saving
-            for _ in range(num_runs):
-                with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                    if len(std.shape) == 3: B, D, _ = std.shape
-                    else: 
-                        D, _ = std.shape
-                        B = 1
-                    eps = torch.randn(B,D,1).to(device)
-                    z = mu + eps * std
-                    pred = decoder(z, scale=val_scale)
-                    
-                min_len = min(pred.shape[-1], hr_wav.shape[-1])
-                pred = pred[..., :min_len].float()
                 
-                run_lsds.append(log_spectral_distance(pred, hr_wav[..., :min_len]).item())
-                run_preds.append(pred)
+                # Mean Prediction
+                pred_mean = decoder(mu, scale=val_scale)
+                min_len = min(pred_mean.shape[-1], hr_wav.shape[-1])
+                pred_mean = pred_mean[..., :min_len].float()
+            
+            # 1 Stochastic Run for evaluation
+            with torch.autocast(device_type=device, dtype=torch.bfloat16):
+                B, D, _ = std.shape if len(std.shape) == 3 else (1, std.shape[0], std.shape[1])
+                eps = torch.randn(B, D, 1).to(device)
+                z = mu + eps * std
+                pred_sample = decoder(z, scale=val_scale)
+                
+            pred_sample = pred_sample[..., :min_len].float()
+            hr_eval = hr_wav[..., :min_len]
+            
+            total_12_expected_lsd += log_spectral_distance(pred_sample, hr_eval).item()
+            snr_metric(pred_sample, hr_eval)
+            
+            # ViSQOL & PESQ Evaluation
+            hr_list = [hr_eval.squeeze(0)]
+            sr_list = [pred_sample.squeeze(0)]
+            
+            v_score = evaluator.evaluate_visqol(hr_list, sr_list, current_sr=hsr_new)
+            p_score = evaluator.evaluate_pesq(hr_list, sr_list, current_sr=hsr_new)
+            
+            if not np.isnan(v_score): visqol_scores.append(v_score)
+            if not np.isnan(p_score): pesq_scores.append(p_score)
 
-            mean_run_lsd = np.mean(run_lsds)
-            total_12_expected_lsd += mean_run_lsd
+            # Save Audio Artifacts (All 12)
+            lr_save_path = os.path.join('audio', f"{model_name}_clip{idx:02d}_1_LR.wav")
+            hr_save_path = os.path.join('audio', f"{model_name}_clip{idx:02d}_2_HR.wav")
+            mean_save_path = os.path.join('audio', f"{model_name}_clip{idx:02d}_3_Mean.wav")
+            sample_save_path = os.path.join('audio', f"{model_name}_clip{idx:02d}_4_Sample.wav")
             
-            # Select the generation closest to the mean LSD for honest visualization
-            closest_idx = np.argmin(np.abs(np.array(run_lsds) - mean_run_lsd))
-            rep_pred = run_preds[closest_idx]
+            sf.write(lr_save_path, lr_wav[0].cpu().numpy().T, low_sampling_rate)
+            sf.write(hr_save_path, hr_eval[0].cpu().numpy().T, hsr_new)
+            sf.write(mean_save_path, pred_mean[0].cpu().numpy().T, hsr_new)
+            sf.write(sample_save_path, pred_sample[0].cpu().numpy().T, hsr_new)
             
-            snr_metric(rep_pred, hr_wav[..., :min_len])
-            
-            hr_16k = resample(hr_wav[..., :min_len], hsr_new, 16000).squeeze(1)
-            pred_16k = resample(rep_pred, hsr_new, 16000).squeeze(1)
-            pesq_metric(pred_16k, hr_16k)
+            # Save 1x4 Spectrogram (All 12)
+            img_save_path = os.path.join('image', f"{model_name}_mel_grid_{idx:02d}.png")
+            plot_mel_spectrogram(lr_wav[0], hr_eval[0], pred_mean[0], pred_sample[0], 
+                                 low_sampling_rate, hsr_new, img_save_path)
 
-            if saved_audio_count < 4:
-                lr_save_path = os.path.join('audio', f"{model_name}_sample{saved_audio_count}_LR.wav")
-                pred_save_path = os.path.join('audio', f"{model_name}_sample{saved_audio_count}_SR.wav")
-                hr_save_path = os.path.join('audio', f"{model_name}_sample{saved_audio_count}_HR.wav")
-                
-                lr_np = lr_wav[0].cpu().numpy()
-                pred_np = rep_pred[0].cpu().numpy()
-                hr_np = hr_wav[0, ..., :min_len].cpu().numpy()
-                
-                if lr_np.ndim == 2: lr_np = lr_np.T
-                if pred_np.ndim == 2: pred_np = pred_np.T
-                if hr_np.ndim == 2: hr_np = hr_np.T
-                    
-                sf.write(lr_save_path, lr_np, low_sampling_rate)
-                sf.write(pred_save_path, pred_np, hsr_new)
-                sf.write(hr_save_path, hr_np, hsr_new)
-                
-                saved_audio_count += 1
-            
-            elif saved_img_count < 2:
-                img_save_path = os.path.join('image', f"{model_name}_mel_comparison_{saved_img_count}.png")
-                plot_mel_spectrogram(hr_wav[0, ..., :min_len], rep_pred[0], hsr_new, img_save_path)
-                saved_img_count += 1
-
-    final_snr_12 = snr_metric.compute().item()
-    final_lsd_12 = total_12_expected_lsd / len(val12_loader)
-    final_pesq_12 = pesq_metric.compute().item()
-    
     print(f"\nPhase 2 Results for {model_name} (12 Full-Length Samples):")
-    print(f"Subset Representative SNR:  {final_snr_12:.2f} dB")
-    print(f"Subset Expected LSD:  {final_lsd_12:.4f}")
-    print(f"Subset Representative PESQ: {final_pesq_12:.4f} (Wide-Band)")
+    print(f"Subset SNR:  {snr_metric.compute().item():.2f} dB")
+    print(f"Subset LSD:  {total_12_expected_lsd / len(val12_loader):.4f}")
+    print(f"Subset PESQ (Wide-Band): {np.mean(pesq_scores):.4f}")
+    print(f"Subset ViSQOL: {np.mean(visqol_scores):.4f}")
 
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'

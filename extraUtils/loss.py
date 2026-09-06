@@ -1,6 +1,7 @@
 import torch
 from torch import nn
-import torch.nn.functional as F 
+import torch.nn.functional as F
+import math
 
 def ganin_scheduler(epoch):
     return torch.tanh(torch.tensor(epoch/2)).item()
@@ -16,13 +17,14 @@ class MultiScaleSpectralLoss(nn.Module):
     def __init__(self, n_ffts=[2048, 512, 128]):
         super().__init__()
         self.n_ffts = n_ffts
+        self.wts = [math.sqrt(2048 / i) for i in n_ffts]
 
     def forward(self, x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         x_hat = x_hat.squeeze(1)
         x = x.squeeze(1)
         
         total_loss = 0
-        for n in self.n_ffts:
+        for i,n in enumerate(self.n_ffts):
             hop = n // 4
             window = torch.hann_window(n, device=x.device)
             
@@ -33,7 +35,7 @@ class MultiScaleSpectralLoss(nn.Module):
             
             mag_loss = F.huber_loss(torch.sqrt(s_hat + 1e-5), torch.sqrt(s + 1e-5), delta=0.25)
             
-            total_loss += (sc_loss + mag_loss)
+            total_loss += (sc_loss + mag_loss) * self.wts[i]
             
         return total_loss
     

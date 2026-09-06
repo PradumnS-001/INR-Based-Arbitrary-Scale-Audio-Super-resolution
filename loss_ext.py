@@ -11,7 +11,7 @@ def generator_adv_losses(
     for the generator across the multi-scale outputs of the EnCodec Discriminator.
     """
     # 1. Unbounded Generator Hinge: -mean(D(fake))
-    loss_hinge = sum([torch.mean(F.relu(1-logit)) for logit in logits_fake]) / len(logits_fake)
+    loss_hinge = sum([-torch.mean(logit) for logit in logits_fake]) / len(logits_fake)
 
     # 2. Relative Feature Matching
     loss_fm = 0.0

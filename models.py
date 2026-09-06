@@ -10,11 +10,11 @@ class Encoder(nn.Module):
         super().__init__()
         
         self.mean_head = nn.Sequential(
-            nn.Conv1d(1, 16, kernel_size=7, padding=3),
+            nn.Conv1d(1, 16, kernel_size=7, padding=3, padding_mode='reflect'),
             getActivation(actfe),
-            nn.Conv1d(16, 32, kernel_size=3, padding=1),
+            nn.Conv1d(16, 32, kernel_size=3, padding=1, padding_mode='reflect'),
             getActivation(actfe),
-            nn.Conv1d(32, 64, kernel_size=3, padding=1),
+            nn.Conv1d(32, 64, kernel_size=3, padding=1, padding_mode='reflect'),
             getActivation(actfe),
             nn.Conv1d(64, 64, kernel_size=1),
             getActivation(actfe),
@@ -22,11 +22,11 @@ class Encoder(nn.Module):
         )
         
         self.std_head = nn.Sequential(
-            nn.Conv1d(1, 16, kernel_size=7, padding=3),
+            nn.Conv1d(1, 16, kernel_size=7, padding=3, padding_mode='reflect'),
             getActivation(actfe),
-            nn.Conv1d(16, 32, kernel_size=3, padding=1),
+            nn.Conv1d(16, 32, kernel_size=3, padding=1, padding_mode='reflect'),
             getActivation(actfe),
-            nn.Conv1d(32, 64, kernel_size=3, padding=1),
+            nn.Conv1d(32, 64, kernel_size=3, padding=1, padding_mode='reflect'),
             getActivation(actfe),
             nn.Conv1d(64, 64, kernel_size=1),
             getActivation(actfe),
@@ -36,7 +36,7 @@ class Encoder(nn.Module):
     def forward(self, x):
         
         mean = self.mean_head(x)
-        std = torch.exp(8.0 * F.softsign(self.std_head(x/4)))
+        std = torch.exp(2.5 * F.softsign(self.std_head(x/2.5)))
         return mean, std
     
 class SkipBlock(nn.Module):
@@ -63,13 +63,15 @@ class INRDecoder(nn.Module):
         self.register_buffer('std_data', torch.tensor(std))
         
         self.decoder = nn.Sequential(
-            nn.Linear(freq_bands * 2 + 2 + encoder_dim * 3, mdim),
-            # getActivation(act=actfdi),
-            # nn.Linear(mdim, mdim),
-            
-            SkipBlock(mdim),
-            SkipBlock(mdim),
-            
+            nn.Linear(freq_bands * 2 + 1 + encoder_dim * 3, mdim),
+            getActivation(act=actfdi),
+            nn.Linear(mdim, mdim),
+            getActivation(act=actfdi),
+            nn.Linear(mdim, mdim),
+            getActivation(act=actfdi),
+            nn.Linear(mdim, mdim),
+            getActivation(act=actfdi),
+            nn.Linear(mdim, mdim),
             getActivation(act=actfdi),
             nn.Linear(mdim, mdim//2),
             getActivation(actfdi),
@@ -111,9 +113,9 @@ class INRDecoder(nn.Module):
         cos_t = torch.cos(scaled_t)
         t_pe = torch.stack([sin_t, cos_t], dim=-1).flatten(start_dim=-2)
         t_encoded = torch.cat([t_rel, t_pe], dim=-1)
-        scale_tensor = torch.full_like(t_rel, math.log(scale))
+        # scale_tensor = torch.full_like(t_rel, math.log(scale))
         
-        feat = torch.cat([t_encoded, z_triplet, scale_tensor], dim=-1)
+        feat = torch.cat([t_encoded, z_triplet], dim=-1)
         out = self.decoder(feat)
         
         return out.transpose(1, 2).contiguous() * self.std_data + self.mean_data
