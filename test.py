@@ -7,7 +7,7 @@ from torchaudio.functional import resample
 from tqdm import tqdm
 import numpy as np
 
-from data import val_loader, val12_loader, tr_loader, calc_opcs
+from data import val_loader, val12_loader
 from configs import *
 from models import Encoder, INRDecoder
 from extraUtils.loss import log_spectral_distance
@@ -16,10 +16,12 @@ from evaluation import Evaluator
 
 def plot_mel_spectrogram(y_lr, y_true, y_mean, y_sample, lr_sr, hr_sr, save_path):
     mel_hr = torchaudio.transforms.MelSpectrogram(sample_rate=hr_sr, n_mels=80, n_fft=1024)
-    mel_lr = torchaudio.transforms.MelSpectrogram(sample_rate=lr_sr, n_mels=80, n_fft=1024)
     db_transform = torchaudio.transforms.AmplitudeToDB(top_db=80)
 
-    mel_l = db_transform(mel_lr(y_lr.cpu())).squeeze().numpy()
+    # Upsample LR so it maps perfectly to the HR mel scale for visual comparison
+    y_lr_up = resample(y_lr.cpu(), lr_sr, hr_sr)
+    
+    mel_l = db_transform(mel_hr(y_lr_up)).squeeze().numpy()
     mel_t = db_transform(mel_hr(y_true.cpu())).squeeze().numpy()
     mel_m = db_transform(mel_hr(y_mean.cpu())).squeeze().numpy()
     mel_s = db_transform(mel_hr(y_sample.cpu())).squeeze().numpy()
@@ -27,7 +29,7 @@ def plot_mel_spectrogram(y_lr, y_true, y_mean, y_sample, lr_sr, hr_sr, save_path
     fig, axes = plt.subplots(1, 4, figsize=(24, 5))
     
     im0 = axes[0].imshow(mel_l, aspect='auto', origin='lower', cmap='viridis')
-    axes[0].set_title('Low Res Input (8kHz)')
+    axes[0].set_title(f'Low Res Input Upsampled')
     axes[0].set_ylabel('Mel bins')
     axes[0].set_xlabel('Frames')
     
@@ -64,10 +66,8 @@ def evaluate_and_save(model_path, model_name, device, num_runs=10):
         dummy_decoder.load_state_dict(checkpoint['decoder'])
         
     decoder = dummy_decoder
-    mean_data, std_data = calc_opcs(tr_loader)
-    decoder.mean_data = torch.tensor(mean_data, device=device)
-    decoder.std_data = torch.tensor(std_data, device=device)
     
+    # Trust the EMA checkpoint buffers completely to prevent amplitude blowout
     encoder.eval()
     decoder.eval()
 
@@ -90,9 +90,9 @@ def evaluate_and_save(model_path, model_name, device, num_runs=10):
                 mu, std = encoder(lr_wav)
                 
                 # 1. Deterministic Prediction (Mean)
-                pred_mean = decoder(mu, scale=val_scale)
+                pred_mean = decoder(mu, scale=val_scale).float()
                 min_len = min(pred_mean.shape[-1], hr_wav.shape[-1])
-                pred_mean = pred_mean[..., :min_len].float()
+                pred_mean = pred_mean[..., :min_len]
                 total_mean_lsd += log_spectral_distance(pred_mean, hr_wav[..., :min_len]).item()
             
             batch_avg_lsd = 0.0
@@ -104,9 +104,9 @@ def evaluate_and_save(model_path, model_name, device, num_runs=10):
                     B, D, _ = std.shape if len(std.shape) == 3 else (1, std.shape[0], std.shape[1])
                     eps = torch.randn(B, D, 1).to(device)
                     z = mu + eps * std
-                    pred_sample = decoder(z, scale=val_scale)
-                    
-                pred_sample = pred_sample[..., :min_len].float()
+                    pred_sample = decoder(z, scale=val_scale).float()
+                
+                pred_sample = pred_sample[..., :min_len]
                 stochastic_preds.append(pred_sample)
                 batch_avg_lsd += log_spectral_distance(pred_sample, hr_wav[..., :min_len]).item()
                 
@@ -126,8 +126,9 @@ def evaluate_and_save(model_path, model_name, device, num_runs=10):
     print(f"Deterministic (Mean) LSD: {total_mean_lsd / num_batches:.4f}")
     print(f"Stochastic Expected LSD: {total_expected_lsd / num_batches:.4f}")
     print(f"Regression Variance Test: {total_stochastic_variance / num_batches:.8f}")
-    if (total_stochastic_variance / num_batches) < 1e-5:
-        print(">>> WARNING: Variance is near zero. The VAE has suffered posterior collapse and is regressing to the mean.")
+    
+    if (total_stochastic_variance / num_batches) < 1e-6:
+        print(">>> WARNING: Variance is mathematically zero. The model suffered posterior collapse and regressed to the mean.")
 
     print(f"\n[Phase 2] Generating 12 Full-Length Samples & Saving Artifacts...")
     snr_metric.reset()
@@ -146,24 +147,23 @@ def evaluate_and_save(model_path, model_name, device, num_runs=10):
                 mu, std = encoder(lr_wav)
                 
                 # Mean Prediction
-                pred_mean = decoder(mu, scale=val_scale)
+                pred_mean = decoder(mu, scale=val_scale).float()
                 min_len = min(pred_mean.shape[-1], hr_wav.shape[-1])
-                pred_mean = pred_mean[..., :min_len].float()
+                pred_mean = pred_mean[..., :min_len]
             
-            # 1 Stochastic Run for evaluation
+            # Stochastic Run
             with torch.autocast(device_type=device, dtype=torch.bfloat16):
                 B, D, _ = std.shape if len(std.shape) == 3 else (1, std.shape[0], std.shape[1])
                 eps = torch.randn(B, D, 1).to(device)
                 z = mu + eps * std
-                pred_sample = decoder(z, scale=val_scale)
+                pred_sample = decoder(z, scale=val_scale).float()[..., :min_len]
                 
-            pred_sample = pred_sample[..., :min_len].float()
             hr_eval = hr_wav[..., :min_len]
             
             total_12_expected_lsd += log_spectral_distance(pred_sample, hr_eval).item()
             snr_metric(pred_sample, hr_eval)
             
-            # ViSQOL & PESQ Evaluation
+            # Evaluation metrics
             hr_list = [hr_eval.squeeze(0)]
             sr_list = [pred_sample.squeeze(0)]
             
@@ -173,7 +173,7 @@ def evaluate_and_save(model_path, model_name, device, num_runs=10):
             if not np.isnan(v_score): visqol_scores.append(v_score)
             if not np.isnan(p_score): pesq_scores.append(p_score)
 
-            # Save Audio Artifacts (All 12)
+            # File Saves
             lr_save_path = os.path.join('audio', f"{model_name}_clip{idx:02d}_1_LR.wav")
             hr_save_path = os.path.join('audio', f"{model_name}_clip{idx:02d}_2_HR.wav")
             mean_save_path = os.path.join('audio', f"{model_name}_clip{idx:02d}_3_Mean.wav")
@@ -184,7 +184,6 @@ def evaluate_and_save(model_path, model_name, device, num_runs=10):
             sf.write(mean_save_path, pred_mean[0].cpu().numpy().T, hsr_new)
             sf.write(sample_save_path, pred_sample[0].cpu().numpy().T, hsr_new)
             
-            # Save 1x4 Spectrogram (All 12)
             img_save_path = os.path.join('image', f"{model_name}_mel_grid_{idx:02d}.png")
             plot_mel_spectrogram(lr_wav[0], hr_eval[0], pred_mean[0], pred_sample[0], 
                                  low_sampling_rate, hsr_new, img_save_path)

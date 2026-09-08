@@ -17,7 +17,7 @@ class MultiScaleSpectralLoss(nn.Module):
     def __init__(self, n_ffts=[2048, 512, 128]):
         super().__init__()
         self.n_ffts = n_ffts
-        self.wts = [math.sqrt(2048 / i) for i in n_ffts]
+        self.wts = [1 for i in n_ffts]
 
     def forward(self, x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         x_hat = x_hat.squeeze(1)
