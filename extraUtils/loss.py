@@ -3,7 +3,8 @@ from torch import nn
 import torch.nn.functional as F 
 
 def ganin_scheduler(epoch):
-    return torch.tanh(torch.tensor(epoch/2)).item()
+    if epoch == 0: return 0
+    return torch.tanh(torch.tensor(epoch/2 - 0.5)).item()
 
 def kullback_liebler_divergence(mean:torch.Tensor, std:torch.Tensor):
     return (-0.5 * (1 + torch.log(std**2) - mean**2 - std**2)).mean()
@@ -37,16 +38,19 @@ class MultiScaleSpectralLoss(nn.Module):
             
         return total_loss
     
-def log_spectral_distance(y_hat:torch.Tensor, y:torch.Tensor)->torch.Tensor:
+def log_spectral_distance(y_hat:torch.Tensor, y:torch.Tensor, n_fft = 512)->torch.Tensor:
     """
     Measures the log spectral distance
     """
-    n_fft = 512
-    s_hat = torch.stft(y_hat.squeeze(1), n_fft, return_complex=True, window=torch.hann_window(n_fft, device=y.device)).abs().pow(2)
-    s = torch.stft(y.squeeze(1), n_fft, return_complex=True,window=torch.hann_window(n_fft, device=y.device)).abs().pow(2)
+    window = torch.hann_window(n_fft, device=y.device)
+        
+    s_hat = torch.stft(y_hat.squeeze(1) if y_hat.ndim > 1 else y_hat, 
+                        n_fft, return_complex=True, window=window).abs().pow(2)
+    s = torch.stft(y.squeeze(1) if y.ndim > 1 else y, 
+                    n_fft, return_complex=True, window=window).abs().pow(2)
     
-    log_s_hat = torch.log(s_hat + 1e-5)
-    log_s = torch.log(s + 1e-5)
+    log10_s_hat = torch.log10(s_hat + 1e-10)
+    log10_s = torch.log10(s + 1e-10)
     
-    dist = torch.sqrt(torch.mean((log_s - log_s_hat)**2, dim=-2))
-    return torch.mean(dist)
+    dist_per_frame = torch.sqrt(torch.mean((log10_s - log10_s_hat)**2, dim=-2))
+    return torch.mean(dist_per_frame)

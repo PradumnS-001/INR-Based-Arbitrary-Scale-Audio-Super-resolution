@@ -61,17 +61,33 @@ class WeightNormLinear(nn.Linear):
 class ModelEMA:
     def __init__(self, model, decay=0.99):
         self.decay = decay
-        self.shadow = {k: v.clone().detach() for k, v in model.state_dict().items() if v.dtype.is_floating_point}
+        self.shadow = {k: v.clone().detach() for k, v in model.state_dict().items()}
+        self.backup = {}
 
     @torch.no_grad()
     def update(self, model):
         state_dict = model.state_dict()
         for name in self.shadow:
-            self.shadow[name].copy_(self.shadow[name] * self.decay + state_dict[name] * (1.0 - self.decay))
+            if self.shadow[name].dtype.is_floating_point:
+                self.shadow[name].copy_(
+                    self.decay * self.shadow[name] + (1.0 - self.decay) * state_dict[name]
+                )
+            else:
+                self.shadow[name].copy_(state_dict[name])
 
     @torch.no_grad()
     def apply_shadow(self, model):
+        """Backs up online weights and loads EMA weights for validation."""
+        self.backup = {k: v.clone().detach() for k, v in model.state_dict().items()}
         model.load_state_dict(self.shadow, strict=True)
+
+    @torch.no_grad()
+    def restore(self, model):
+        """Restores the original online weights to resume training."""
+        if not self.backup:
+            raise RuntimeError("Cannot restore weights without calling apply_shadow first.")
+        model.load_state_dict(self.backup, strict=True)
+        self.backup = {}
         
 class Swiglu(nn.Module):
     """
@@ -86,3 +102,79 @@ class Swiglu(nn.Module):
         x = self.proj(x)
         gate, info = x.chunk(2, dim=-1)
         return info * F.silu(gate)
+    
+class DenseLayer1D(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(DenseLayer1D, self).__init__()
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=3 // 2)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        return torch.cat([x, self.relu(self.conv(x))], 1)
+
+
+class RDB1D(nn.Module):
+    def __init__(self, in_channels, growth_rate, num_layers):
+        super(RDB1D, self).__init__()
+        self.layers = nn.Sequential(*[DenseLayer1D(in_channels + growth_rate * i, growth_rate) for i in range(num_layers)])
+
+        # local feature fusion
+        self.lff = nn.Conv1d(in_channels + growth_rate * num_layers, growth_rate, kernel_size=1)
+
+    def forward(self, x):
+        return x + self.lff(self.layers(x))  # local residual learning
+
+
+class RDN1D(nn.Module):
+    def __init__(self, scale_factor, num_channels, num_features, growth_rate, num_blocks, num_layers):
+        super(RDN1D, self).__init__()
+        self.G0 = num_features
+        self.G = growth_rate
+        self.D = num_blocks
+        self.C = num_layers
+
+        # shallow feature extraction
+        self.sfe1 = nn.Conv1d(num_channels, num_features, kernel_size=3, padding=3 // 2)
+        self.sfe2 = nn.Conv1d(num_features, num_features, kernel_size=3, padding=3 // 2)
+
+        # residual dense blocks
+        self.rdb1Ds = nn.ModuleList([RDB1D(self.G0, self.G, self.C)])
+        for _ in range(self.D - 1):
+            self.rdb1Ds.append(RDB1D(self.G, self.G, self.C))
+
+        # global feature fusion
+        self.gff = nn.Sequential(
+            nn.Conv1d(self.G * self.D, self.G0, kernel_size=1),
+            nn.Conv1d(self.G0, self.G0, kernel_size=3, padding=3 // 2)
+        )
+
+        # up-sampling
+        assert 2 <= scale_factor <= 4
+        if scale_factor == 2 or scale_factor == 4:
+            self.upscale = []
+            for _ in range(scale_factor // 2):
+                self.upscale.extend([nn.Conv1d(self.G0, self.G0 * (2 ** 2), kernel_size=3, padding=3 // 2),
+                                     nn.PixelShuffle(2)])
+            self.upscale = nn.Sequential(*self.upscale)
+        else:
+            self.upscale = nn.Sequential(
+                nn.Conv1d(self.G0, self.G0 * (scale_factor ** 2), kernel_size=3, padding=3 // 2),
+                nn.PixelShuffle(scale_factor)
+            )
+
+        self.output = nn.Conv1d(self.G0, num_channels, kernel_size=3, padding=3 // 2)
+
+    def forward(self, x):
+        sfe1 = self.sfe1(x)
+        sfe2 = self.sfe2(sfe1)
+
+        x = sfe2
+        local_features = []
+        for i in range(self.D):
+            x = self.rdb1Ds[i](x)
+            local_features.append(x)
+
+        x = self.gff(torch.cat(local_features, 1)) + sfe1  # global residual learning
+        x = self.upscale(x)
+        x = self.output(x)
+        return x

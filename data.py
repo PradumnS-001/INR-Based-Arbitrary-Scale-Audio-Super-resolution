@@ -32,7 +32,6 @@ class AudioCorpus(Dataset):
         self.trunc = trunc
         
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.resample_down = T.Resample(orig_freq=self.hsr, new_freq=self.lsr).to(self.device)
         self.resample_to_hsr = {}
         
     def __len__(self):
@@ -61,11 +60,8 @@ class AudioCorpus(Dataset):
             if sr not in self.resample_to_hsr:
                 self.resample_to_hsr[sr] = T.Resample(orig_freq=sr, new_freq=self.hsr).to(self.device)
             hrw = self.resample_to_hsr[sr](hrw)
-            
-        lrw = self.resample_down(hrw)
         
-        return lrw.cpu(), hrw.cpu()
-    
+        return 0, hrw.cpu()
     
 dataset = AudioCorpus()
 tr_len = int(0.8 * len(dataset))
@@ -75,10 +71,10 @@ tr_set, val_set = random_split(dataset, [tr_len, val_len], generator=generator)
 tr_loader = DataLoader(tr_set, batch_size=batch_size, shuffle=True, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4,drop_last=True)
 val_loader = DataLoader(val_set, batch_size=batch_size, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4)
 
-val12_indices = val_set.indices[:12]
-val12_files = [dataset.files[i] for i in val12_indices]
-val12_set = AudioCorpus(file_list=val12_files, trunc=False)
-val12_loader = DataLoader(val12_set, batch_size=1, shuffle=False, num_workers=0)
+val100_indices = val_set.indices[:100]
+val100_files = [dataset.files[i] for i in val100_indices]
+val100_set = AudioCorpus(file_list=val100_files, trunc=False)
+val100_loader = DataLoader(val100_set, batch_size=1, shuffle=False, num_workers=0)
 
 @torch.no_grad()
 def calc_opcs(data: AudioCorpus) -> torch.Tensor:
@@ -101,3 +97,6 @@ def calc_opcs(data: AudioCorpus) -> torch.Tensor:
     true_mean = total_sum / total_elements
     
     return true_mean, true_std
+
+if __name__ == "__main__":
+    print(calc_opcs(tr_loader))
