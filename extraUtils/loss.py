@@ -14,7 +14,7 @@ class MultiScaleSpectralLoss(nn.Module):
     Implements the Multi-resolution STFT loss.
     Consists of Spectral Convergence (L2) and Power (Huber) losses.
     """
-    def __init__(self, n_ffts=[2048, 512, 128]):
+    def __init__(self, n_ffts=[2048, 1024, 512, 256, 128]):
         super().__init__()
         self.n_ffts = n_ffts
 
@@ -30,13 +30,14 @@ class MultiScaleSpectralLoss(nn.Module):
             s_hat = torch.stft(x_hat, n, hop_length=hop, window=window, return_complex=True).abs()
             s = torch.stft(x, n, hop_length=hop, window=window, return_complex=True).abs()
             
-            sc_loss = torch.norm(s - s_hat, p="fro") / torch.norm(s, p="fro").clamp(min=1e-7)
+            diff_sq = (s - s_hat) ** 2
+            sc_loss = torch.sqrt(torch.sum(diff_sq) + 1e-7) / (torch.sqrt(torch.sum(s ** 2)) + 1e-7)
             
-            mag_loss = F.huber_loss(torch.sqrt(s_hat + 1e-5), torch.sqrt(s + 1e-5), delta=0.25)
+            mag_loss = F.l1_loss(torch.sqrt(s_hat + 1e-5), torch.sqrt(s + 1e-5))
             
             total_loss += (sc_loss + mag_loss)
             
-        return total_loss
+        return total_loss / len(self.n_ffts)
     
 def log_spectral_distance(y_hat:torch.Tensor, y:torch.Tensor, n_fft = 512)->torch.Tensor:
     """

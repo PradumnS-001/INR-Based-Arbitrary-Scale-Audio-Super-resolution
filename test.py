@@ -151,9 +151,9 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # Explicitly set testing sample rates
-    test_low_sr = 8000
-    test_high_sr = 24000
-    visqol_sr = 16000  # Set to 16000 or 48000
+    test_low_sr = 24000
+    test_high_sr = 48000
+    visqol_sr = 48000  # Set to 16000 or 48000
 
     best_model_path = os.path.join('models', 'lisa_best_model_lsd.pt')
     last_model_path = os.path.join('models', 'lisa_last_model.pt')

@@ -28,7 +28,6 @@ MANIFEST
 runs/
 
 playground.ipynb
-models/
 image/
 audio/
 
@@ -56,6 +55,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+models copy/
 
 # Translations
 *.mo

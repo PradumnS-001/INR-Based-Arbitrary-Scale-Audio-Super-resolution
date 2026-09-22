@@ -48,7 +48,7 @@ def main():
     
     if do_adversarial:
         disc = MultiScaleSTFTDiscriminator(filters=filters).to(device)
-        perceptual_loss = EncodecIntermediatePerceptualLoss(target_sr=max_target_sr, device=device)
+        perceptual_loss = MultiScaleSpectralLoss().to(device)
     else:
         disc = None
         mssl = MultiScaleSpectralLoss().to(device)
@@ -76,17 +76,27 @@ def main():
     snr_metric = SignalNoiseRatio().to(device)
     best_lsd = float('inf')
     
+    print(f"Training {low_sampling_rate // 1000}kHz --> {max_target_sr // 1000}kHz @ {scale_res} scale-resolution")
     print("Precomputing Resample Filter Banks...")
     resamplers = {}
-    max_scale_int = int(scale_res * (max_target_sr / low_sampling_rate))
+
+    # Use integer division for max scale to avoid float drift
+    max_scale_int = (scale_res * max_target_sr) // low_sampling_rate
+
     for s in range(scale_res, max_scale_int + 1):
-        target_freq = int(low_sampling_rate * (s / scale_res))
-        resamplers[target_freq] = torchaudio.transforms.Resample(
+        # Multiply FIRST, then floor divide. This completely bypasses floating-point precision issues.
+        target_freq = (low_sampling_rate * s) // scale_res
+        
+        # Key the dictionary by the integer 's' instead of the calculated frequency
+        resamplers[s] = torchaudio.transforms.Resample(
             orig_freq=high_sampling_rate, new_freq=target_freq
         ).to(device=device, non_blocking=True)
         
     resample_to_max = torchaudio.transforms.Resample(
         orig_freq=high_sampling_rate, new_freq=max_target_sr
+    ).to(device=device, non_blocking=True)
+    resample_to_min = torchaudio.transforms.Resample(
+        orig_freq=high_sampling_rate, new_freq=low_sampling_rate
     ).to(device=device, non_blocking=True)
     print("Training Started")
 
@@ -104,9 +114,12 @@ def main():
             hr_target = resample_to_max(hr_wav) if high_sampling_rate != max_target_sr else hr_wav
             
             # Route 2: Input Resolution (Randomly sampled between low_sr and max_target_sr)
-            scale_arb = np.random.randint(scale_res, max_scale_int + 1) / scale_res
-            in_sr = int(low_sampling_rate * scale_arb)
-            lr_input = resamplers[in_sr](hr_wav)
+            s = np.random.randint(scale_res, max_scale_int + 1)
+            in_sr = (low_sampling_rate * s) // scale_res
+            if s in resamplers:
+                lr_input = resamplers[s](hr_wav)
+            else:
+                lr_input = torchaudio.functional.resample(hr_wav, high_sampling_rate, in_sr)
 
             # --- GENERATOR STEP ---
             if do_adversarial: set_requires_grad([disc], False)
@@ -123,7 +136,7 @@ def main():
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
                     logits_fake, _ = disc(hat_x)
                     loss_hinge_g = generator_hinge_loss(logits_fake)
-                loss_G = (l1_weight * loss_l1) + (percp_weight * loss_percp) + (adv_weight * loss_hinge_g * ganin_scheduler(epoch=epoch))
+                loss_G = (l1_weight * loss_l1) + (percp_weight * loss_percp) + (adv_weight * loss_hinge_g * (epoch > 0))
             else:
                 loss_spec = mssl(hat_x, hr_target)
                 loss_G = (l1_weight * loss_l1) + (mssl_weight * loss_spec)
@@ -181,7 +194,7 @@ def main():
                 hr_target = resample_to_max(hr_wav) if high_sampling_rate != max_target_sr else hr_wav
                 
                 # Test exactly at low_sampling_rate mapping to max_target_sr
-                lr_input = resamplers[low_sampling_rate](hr_wav)
+                lr_input = resample_to_min(hr_wav)
                 
                 pred = model(lr_input, low_sampling_rate, max_target_sr)
                 min_len = min(pred.shape[-1], hr_target.shape[-1])

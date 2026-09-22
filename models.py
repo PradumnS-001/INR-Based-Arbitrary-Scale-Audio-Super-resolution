@@ -56,7 +56,7 @@ class KernelNet(nn.Module):
 class LatentMappingNetwork(nn.Module):
     """
     Maps the local latent triplet + relative time to a SINGLE global FiLM 
-    scaling (\gamma) and shifting (\beta) parameter pair applied to all layers.
+    scaling (gamma) and shifting (beta) parameter pair applied to all layers.
     Mathematically mirrors the official PiGANMappingNetwork.
     """
     def __init__(self, in_features, hidden_dim=mdim):
@@ -234,7 +234,7 @@ class Model(nn.Module):
         self.mapping_net = LatentMappingNetwork(in_features, hidden_dim=mdim)
         self.pcinr = FiLMPCINR(num_layers=self.num_inr_layers, hidden_dim=mdim)
 
-    def forward(self, x, low_sr, high_sr):
+    def forward(self, x:torch.Tensor, low_sr, high_sr):
         # Derive scale dynamically from the provided sampling rates
         scale = high_sr / low_sr
         
@@ -245,6 +245,7 @@ class Model(nn.Module):
         
         # 2. Dynamic Encoder extracts exactly 1 latent per input sample
         z = self.encoder(x_norm, low_sr)
+        if self.training: z += torch.randn_like(z) * 0.01
         z_pad = F.pad(z, (1, 1), mode='replicate')
         z_prev = z_pad[:, :, :-2]
         z_curr = z_pad[:, :, 1:-1]
@@ -305,3 +306,71 @@ class Model(nn.Module):
         state_key = 'ema' if 'ema' in checkpoint else 'model'
         
         self.load_state_dict(checkpoint[state_key], strict=True)
+        
+class LISA(nn.Module):
+    def __init__(self, mean, std):
+        super().__init__()
+        
+        self.encoder = nn.Sequential(
+            nn.Conv1d(1, 16, kernel_size=7, padding=3),
+            nn.ReLU(),
+            nn.Conv1d(16, 32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(64, 32, kernel_size=1)
+        )
+        
+        self.decoder = nn.Sequential(
+            nn.Linear(1 + 3 * 32, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+        
+        self.std = std
+        self.mean = mean
+
+    def forward(self, x_lr:torch.Tensor, scale:int | float):
+        
+        x_lr = (x_lr - self.mean) / self.std
+        
+        B, _, L_lr = x_lr.shape
+        L_hr = int(L_lr * scale)
+        
+        z = self.encoder(x_lr)
+        
+        t_hr = torch.arange(L_hr, device=x_lr.device).float() / scale
+        t_hr = t_hr.unsqueeze(0).repeat(B, 1)
+        
+        if self.training:
+            eta = torch.randn_like(t_hr) * 0.4
+            t_select = t_hr + eta
+        else:
+            t_select = t_hr
+        
+        idx_i = torch.round(t_select).long().clamp(0, L_lr - 1)
+        t_i = idx_i.float()
+        
+        t_rel = (t_hr - t_i).unsqueeze(-1)
+        z_pad = F.pad(z, (1, 1), mode='replicate')
+        idx_curr = idx_i + 1
+        idx_prev = idx_i
+        idx_next = idx_i + 2
+        
+        def collect(idx:torch.Tensor):
+            expanded_idx = idx.unsqueeze(1).expand(-1, z.shape[1], -1)
+            return torch.gather(z_pad, 2, expanded_idx)
+
+        z_triplet = torch.cat([collect(idx_prev), collect(idx_curr), collect(idx_next)], dim=1)
+        z_triplet = z_triplet.transpose(1, 2)
+        
+        feat = torch.cat([t_rel, z_triplet], dim=-1)
+        out = self.decoder(feat)
+        
+        return out.transpose(1, 2) * self.std + self.mean
