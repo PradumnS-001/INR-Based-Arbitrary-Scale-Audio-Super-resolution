@@ -9,77 +9,69 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from torchmetrics.audio import SignalNoiseRatio
 from torch.utils.tensorboard import SummaryWriter
+import auraloss
 
 from configs import *
 from data import tr_loader, val_loader
-from models import Model
-from extraUtils.layer import ModelEMA
-from extraUtils.loss import MultiScaleSpectralLoss, log_spectral_distance, ganin_scheduler
-from loss_ext import (
-    generator_hinge_loss, 
-    discriminator_hinge_loss, 
-    EncodecIntermediatePerceptualLoss
-)
+from models import SIRIUS
+from components import ModelEMA
+from functions import log_spectral_distance, set_requires_grad, generator_hinge_loss, discriminator_hinge_loss
 from encodec.msstftd import MultiScaleSTFTDiscriminator
 
-def set_requires_grad(nets, requires_grad=False):
-    for net in nets:
-        if net is not None:
-            for param in net.parameters():
-                param.requires_grad = requires_grad
-
 def main():
+    
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(device)
+    
     torch.backends.cudnn.benchmark = False
     os.makedirs('models', exist_ok=True)
     os.makedirs('runs', exist_ok=True)
     
-    writer = SummaryWriter(log_dir='runs/lisa_run_02')
+    writer = SummaryWriter(log_dir='runs/sirius_run_01')
     global_step = 0
-
+    
+    ## Values Obtained from the calculate_stats function in data.py
     mean_data = 0
     std_data_val = 0.0594
     
     print(f"Data Mean: {mean_data}, Data Std: {std_data_val}")
     
-    model = Model(mean=mean_data, std=std_data_val).to(device)
+    model = SIRIUS(mean=mean_data, std=std_data_val).to(device)
     ema = ModelEMA(model, decay=ema_wt)
     
     if do_adversarial:
         disc = MultiScaleSTFTDiscriminator(filters=filters).to(device)
-        perceptual_loss = MultiScaleSpectralLoss().to(device)
+
     else:
         disc = None
-        mssl = MultiScaleSpectralLoss().to(device)
+        
+    mssl = auraloss.freq.MultiResolutionSTFTLoss(
+                                fft_sizes=[2048, 1024, 512, 256, 128],
+                                hop_sizes=[512, 256, 128, 64, 32],
+                                win_lengths=[2048, 1024, 512, 256, 128],
+                                sample_rate=max_target_sr,
+                                perceptual_weighting=True
+                            )
 
-    # Optimizer Selection
-    if optimizer_type == 'adabelief':
-        from adabelief_pytorch import AdaBelief
-        opt_G = AdaBelief(model.parameters(), lr=lr, eps=1e-16, betas=(0.75, 0.9), weight_decay=wdc)
-        if do_adversarial:
-            opt_D = AdaBelief(disc.parameters(), lr=lr*2, eps=1e-16, betas=(0.5, 0.9), weight_decay=wdc)
-    else:
-        opt_G = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.75, 0.9), weight_decay=wdc)
-        if do_adversarial:
-            opt_D = torch.optim.AdamW(disc.parameters(), lr=lr*2, betas=(0.5, 0.9), weight_decay=wdc)
+
+    opt_G = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.75, 0.9), weight_decay=wdc)
+    if do_adversarial:
+        opt_D = torch.optim.AdamW(disc.parameters(), lr=lr*2, betas=(0.5, 0.9), weight_decay=wdc/10)
 
     # Scheduler Selection
     cons_sch_G = torch.optim.lr_scheduler.ConstantLR(opt_G, factor=1.0, total_iters=10)
-    cos_sch_G = torch.optim.lr_scheduler.CosineAnnealingLR(opt_G, T_max= epochs-10, eta_min=lr/100)
-    scheduler_G = torch.optim.lr_scheduler.SequentialLR(opt_G, schedulers=[cons_sch_G, cos_sch_G], milestones=[10])
+    cos_sch_G = torch.optim.lr_scheduler.CosineAnnealingLR(opt_G, T_max= epochs-step_size, eta_min=lr/100)
+    scheduler_G = torch.optim.lr_scheduler.SequentialLR(opt_G, schedulers=[cons_sch_G, cos_sch_G], milestones=[step_size])
     
     cons_sch_D = torch.optim.lr_scheduler.ConstantLR(opt_D, factor=1.0, total_iters=10)
-    cos_sch_D = torch.optim.lr_scheduler.CosineAnnealingLR(opt_D, T_max= epochs-10, eta_min=lr/50)
-    scheduler_D = torch.optim.lr_scheduler.SequentialLR(opt_D, schedulers=[cons_sch_D, cos_sch_D], milestones=[10])
+    cos_sch_D = torch.optim.lr_scheduler.CosineAnnealingLR(opt_D, T_max= epochs-step_size, eta_min=lr/50)
+    scheduler_D = torch.optim.lr_scheduler.SequentialLR(opt_D, schedulers=[cons_sch_D, cos_sch_D], milestones=[step_size])
 
     snr_metric = SignalNoiseRatio().to(device)
-    best_lsd = float('inf')
     
     print(f"Training {low_sampling_rate // 1000}kHz --> {max_target_sr // 1000}kHz @ {scale_res} scale-resolution")
     print("Precomputing Resample Filter Banks...")
     resamplers = {}
-
     # Use integer division for max scale to avoid float drift
     max_scale_int = (scale_res * max_target_sr) // low_sampling_rate
 
@@ -107,7 +99,7 @@ def main():
         pbar = tqdm(tr_loader, desc=f"Epoch {epoch}")
         is_threshold = random.random() < thershold
 
-        for step, (_, hr_wav) in enumerate(pbar):
+        for step, hr_wav in enumerate(pbar):
             hr_wav = hr_wav.to(device)
 
             # Route 1: Target Resolution (Always max_target_sr)
@@ -132,11 +124,11 @@ def main():
             loss_l1 = F.l1_loss(hat_x, hr_target)
 
             if do_adversarial:
-                loss_percp = perceptual_loss(hat_x, hr_target)
+                loss_percp = mssl(hat_x, hr_target)
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
                     logits_fake, _ = disc(hat_x)
                     loss_hinge_g = generator_hinge_loss(logits_fake)
-                loss_G = (l1_weight * loss_l1) + (percp_weight * loss_percp) + (adv_weight * loss_hinge_g * (epoch > 0))
+                loss_G = (l1_weight * loss_l1) + (mssl_weight * loss_percp) + (adv_weight * loss_hinge_g * (epoch > 0))
             else:
                 loss_spec = mssl(hat_x, hr_target)
                 loss_G = (l1_weight * loss_l1) + (mssl_weight * loss_spec)
@@ -211,20 +203,11 @@ def main():
         writer.add_scalar('Val/LSD', current_lsd, epoch)
         writer.add_scalar('Val/SNR', current_snr, epoch)
         print(f"Epoch {epoch} | Val LSD: {current_lsd:.4f} | Val SNR: {current_snr:.2f}")
-
-        if current_lsd <= best_lsd:
-            best_lsd = current_lsd
-            torch.save({
-                'model': model.state_dict(), # Save the whole unified model
-                'ema': ema.shadow,           # EMA already tracks the whole model
-                'lsd': best_lsd
-            }, os.path.join('models', "lisa_best_model_lsd.pt"))
         
-        if epoch == epochs - 1:
-            torch.save({
-                'model': model.state_dict(),
-                'ema': ema.shadow
-            }, os.path.join('models', "lisa_last_model.pt"))
+        torch.save({
+            'model': model.state_dict(),
+            'ema': ema.shadow
+        }, os.path.join('models', "sirius_last_model.pt"))
 
         gc.collect()
         torch.cuda.empty_cache()

@@ -3,7 +3,7 @@ from torch.utils.data import Dataset, random_split, DataLoader
 import torchaudio.transforms as T
 import soundfile as sf
 import numpy as np
-from extraUtils.misc import get_leaf_files
+from utility import get_leaf_files
 from configs import *
 
 np.random.seed(seed)
@@ -61,7 +61,7 @@ class AudioCorpus(Dataset):
                 self.resample_to_hsr[sr] = T.Resample(orig_freq=sr, new_freq=self.hsr).to(self.device)
             hrw = self.resample_to_hsr[sr](hrw)
         
-        return 0, hrw.cpu()
+        return hrw.cpu()
     
 dataset = AudioCorpus()
 tr_len = int(0.8 * len(dataset))
@@ -71,13 +71,13 @@ tr_set, val_set = random_split(dataset, [tr_len, val_len], generator=generator)
 tr_loader = DataLoader(tr_set, batch_size=batch_size, shuffle=True, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4,drop_last=True)
 val_loader = DataLoader(val_set, batch_size=batch_size, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4)
 
-val100_indices = val_set.indices[:100]
-val100_files = [dataset.files[i] for i in val100_indices]
-val100_set = AudioCorpus(file_list=val100_files, trunc=False)
-val100_loader = DataLoader(val100_set, batch_size=1, shuffle=False, num_workers=0)
+test_idxs = val_set.indices[:200]
+test_files = [dataset.files[i] for i in test_idxs]
+test_set = AudioCorpus(file_list=test_files, trunc=False)
+test_loader = DataLoader(test_set, batch_size=1, shuffle=False, num_workers=0)
 
 @torch.no_grad()
-def calc_opcs(data: AudioCorpus) -> torch.Tensor:
+def calculate_stats(data: AudioCorpus) -> torch.Tensor:
     count = 0
     total_sum = 0.0
     total_sq_sum = 0.0
@@ -99,4 +99,4 @@ def calc_opcs(data: AudioCorpus) -> torch.Tensor:
     return true_mean, true_std
 
 if __name__ == "__main__":
-    print(calc_opcs(tr_loader))
+    print(calculate_stats(tr_loader))
