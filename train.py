@@ -1,9 +1,8 @@
 import torch
 from torch.nn import functional as F
-from torchaudio.functional import resample
+import torchaudio
 from tqdm import tqdm
 import numpy as np
-import gc
 import os
 
 from data import tr_loader, val_loader
@@ -25,8 +24,28 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
     
-    best_lsd = float('inf')
-    best_snr = -1*float('inf')
+    # ==============================================================================
+    # Modern Standard: Cached Resample Filter Banks with Float-less Math
+    # ==============================================================================
+    print("Precomputing Resample Filter Banks...")
+    resamplers = {}
+    
+    max_scale_int = (scale_res * max_target_sr) // low_sampling_rate
+    
+    for s in range(scale_res, max_scale_int + 1):
+        # Multiply FIRST, then floor divide to bypass floating-point precision drift
+        target_freq = (low_sampling_rate * s) // scale_res
+        
+        # Key the dictionary directly by the integer 's'
+        resamplers[s] = torchaudio.transforms.Resample(
+            orig_freq=high_sampling_rate, new_freq=target_freq
+        ).to(device=device, non_blocking=True)
+        
+    resample_to_min = torchaudio.transforms.Resample(
+        orig_freq=high_sampling_rate, new_freq=low_sampling_rate
+    ).to(device=device, non_blocking=True)
+
+    print("Training Started")
 
     for epoch in range(epochs):
         
@@ -34,30 +53,36 @@ def main():
         epoch_loss = 0
         pbar = tqdm(tr_loader, desc=f"Epoch {epoch}")
         
-        for lr_wav, hr_wav in pbar:
+        # Modern Standard: Ignore the pre-degraded lr_wav to prevent filter compounding
+        for step, (_, hr_wav) in enumerate(pbar):
             
-            lr_wav:torch.Tensor = lr_wav.to(device)
-            scale = np.random.randint(100, int(100*high_sampling_rate/low_sampling_rate + 1)) / 100
-            hsr_new = int(low_sampling_rate * scale)
-            with torch.no_grad(): hr_wav = resample(hr_wav, high_sampling_rate, hsr_new)
+            hr_wav = hr_wav.to(device, non_blocking=True)
             
-            hr_wav:torch.Tensor = hr_wav.to(device)
+            # Sample integer scale using the approximator
+            s = np.random.randint(scale_res, max_scale_int + 1)
+            target_sr = (low_sampling_rate * s) // scale_res
+            true_scale = target_sr / low_sampling_rate
+            
+            # Parallel native resampling directly from the pristine HR source
+            lr_input = resample_to_min(hr_wav)
+            hr_target = resamplers[s](hr_wav)
+            
             optimizer.zero_grad()
             
-            pred = model(lr_wav, scale=scale)
-            min_len = min(pred.shape[-1],hr_wav.shape[-1])
-            pred, hr_wav = pred[...,:min_len], hr_wav[...,:min_len]
+            pred = model(lr_input, scale=true_scale)
+            min_len = min(pred.shape[-1], hr_target.shape[-1])
+            pred, hr_target = pred[..., :min_len], hr_target[..., :min_len]
             
-            loss:torch.Tensor = mssl_wt * mssl(pred, hr_wav) + l1_wt * F.l1_loss(pred, hr_wav)
+            loss = mssl_wt * mssl(pred, hr_target) + l1_wt * F.l1_loss(pred, hr_target)
             
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_norm)
             optimizer.step()
             
-            epoch_loss += loss.item()
-            pbar.set_postfix({"loss": loss.item()})
+            epoch_loss += loss.detach()
+            if step % 10 == 0:
+                pbar.set_postfix({"loss": loss.item()})
             
-        gc.collect()
         torch.cuda.empty_cache()
         
         avg_train_loss = epoch_loss / len(tr_loader)
@@ -65,49 +90,39 @@ def main():
         model.eval()
         snr_metric.reset()
         avg_lsd = 0
+        
         with torch.no_grad():
-            for lr_wav, hr_wav in val_loader:
-                lr_wav, hr_wav = lr_wav.to(device), hr_wav.to(device)
+            for _, hr_wav in val_loader:
+                hr_wav = hr_wav.to(device)
                 
-                scale = val_scale
-                hsr_new = int(low_sampling_rate * scale)
-                hr_wav = resample(hr_wav, high_sampling_rate, hsr_new)
+                s_val = int(val_scale * scale_res)
                 
-                pred = model(lr_wav, scale=scale)
-                min_len = min(pred.shape[-1],hr_wav.shape[-1])
-                pred, hr_wav = pred[...,:min_len], hr_wav[...,:min_len]
+                # Fetch target directly from cache if possible
+                lr_input = resample_to_min(hr_wav)
+                if s_val in resamplers:
+                    hr_target = resamplers[s_val](hr_wav)
+                    target_sr = (low_sampling_rate * s_val) // scale_res
+                    true_scale = target_sr / low_sampling_rate
+                else:
+                    target_sr = int(low_sampling_rate * val_scale)
+                    hr_target = torchaudio.functional.resample(hr_wav, high_sampling_rate, target_sr).to(device)
+                    true_scale = val_scale
                 
-                snr_metric(pred, hr_wav)
-                avg_lsd += log_spectral_distance(pred, hr_wav).item()
+                pred = model(lr_input, scale=true_scale)
+                min_len = min(pred.shape[-1], hr_target.shape[-1])
+                pred, hr_target = pred[..., :min_len], hr_target[..., :min_len]
+                
+                snr_metric(pred, hr_target)
+                avg_lsd += log_spectral_distance(pred, hr_target).item()
                 
         current_val_snr = snr_metric.compute().item()
         current_val_lsd = avg_lsd / len(val_loader)
         
         print(f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Val SNR: {current_val_snr:.2f} | Val LSD: {current_val_lsd:.4f}")
-        
-        if current_val_lsd <= best_lsd:
-            best_lsd = current_val_lsd
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'lsd': best_lsd,
-                'snr': current_val_snr
-            }, os.path.join('models',"lisa_best_model_lsd.pt"))
-            print(f"--> Best model saved with LSD: {best_lsd:.4f}")
-        if current_val_snr >= best_snr:
-            best_snr = current_val_snr
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'lsd': current_val_lsd,
-                'snr': best_snr
-            }, os.path.join('models',"lisa_best_model_snr.pt"))
-            print(f"--> Best model saved with SNR: {best_snr:.4f}")
         scheduler.step()
-        if epoch % 10 == 0:
-            torch.save(model.state_dict(), os.path.join('models',f"lisa_checkpoint_epoch_{epoch}.pt"))
+        
+        if epoch == epochs - 1:
+            torch.save(model.state_dict(), os.path.join('models', f"lisa_final_epoch.pt"))
         
 if __name__ == "__main__":
     main()

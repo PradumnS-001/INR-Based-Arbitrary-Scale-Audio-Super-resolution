@@ -52,11 +52,11 @@ class AudioCorpus(Dataset):
         return lrw, hrw
     
 dataset = AudioCorpus()
-tr_len = int(0.9 * len(dataset))
+tr_len = int(0.8 * len(dataset))
 val_len = len(dataset) - tr_len
 tr_set, val_set = random_split(dataset, [tr_len, val_len], generator=generator)
 
-batch_size = 32
+batch_size = 16
 tr_loader = DataLoader(tr_set, batch_size=batch_size, shuffle=True, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4)
 val_loader = DataLoader(val_set, batch_size=batch_size, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4)
 
