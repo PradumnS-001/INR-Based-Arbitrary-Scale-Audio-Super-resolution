@@ -60,7 +60,7 @@ batch_size = 16
 tr_loader = DataLoader(tr_set, batch_size=batch_size, shuffle=True, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4)
 val_loader = DataLoader(val_set, batch_size=batch_size, num_workers=4, persistent_workers=True, pin_memory=True, prefetch_factor=4)
 
-val12_indices = val_set.indices[:12]
+val12_indices = val_set.indices[:200]
 val12_files = [dataset.files[i] for i in val12_indices]
 val12_set = AudioCorpus(file_list=val12_files, trunc=False)
-val12_loader = DataLoader(val12_set, batch_size=1, shuffle=False, num_workers=0)
+val200_loader = DataLoader(val12_set, batch_size=1, shuffle=False, num_workers=0)

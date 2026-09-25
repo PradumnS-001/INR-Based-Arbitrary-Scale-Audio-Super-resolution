@@ -1,22 +1,78 @@
 import os
+import math
 import torch
 import torchaudio
 import soundfile as sf
 import matplotlib.pyplot as plt
+import numpy as np
 from torchaudio.functional import resample
 from tqdm import tqdm
 
+# Handle Visqol import gracefully
+try:
+    from visqol import VisqolApi
+    HAS_VISQOL = True
+except ImportError:
+    HAS_VISQOL = False
+
 # Import your custom modules
-from data import val_loader, val12_loader
+# FIX: Explicitly importing the 200 clips loader
+from data import val200_loader
 from configs import *
 from models import LISA
-from extraUtils.loss import log_spectral_distance
-from torchmetrics.audio import SignalNoiseRatio
 
-try:
-    from torchmetrics.audio.pesq import PerceptualEvaluationSpeechQuality
-except ImportError:
-    raise ImportError("Please install PESQ support: pip install pesq torchmetrics[audio]")
+# ==============================================================================
+# 1. Metric Computation Functions
+# ==============================================================================
+
+def log_spectral_distance(y_hat:torch.Tensor, y:torch.Tensor, n_fft = 512) -> float:
+    """
+    Measures the log spectral distance (LSD) in acoustic Decibels (dB).
+    """
+    window = torch.hann_window(n_fft, device=y.device)
+        
+    s_hat = torch.stft(y_hat.squeeze(1) if y_hat.ndim > 1 else y_hat, 
+                        n_fft, return_complex=True, window=window).abs().pow(2)
+    s = torch.stft(y.squeeze(1) if y.ndim > 1 else y, 
+                    n_fft, return_complex=True, window=window).abs().pow(2)
+    
+    # 1e-7 establishes a strict -70dB physical noise floor 
+    log10_s_hat = torch.log10(s_hat + 1e-7)
+    log10_s = torch.log10(s + 1e-7)
+    
+    dist_per_frame = torch.sqrt(torch.mean((log10_s - log10_s_hat)**2, dim=-2))
+    
+    # 10.0 multiplier converts Bels to acoustic dB
+    return torch.mean(dist_per_frame).item()
+
+
+class ViSQOLManager:
+    """Manages separate 16kHz (Speech) and 48kHz (Audio) ViSQOL sessions."""
+    def __init__(self):
+        self.api_16k = None
+        self.api_48k = None
+        if HAS_VISQOL:
+            try:
+                self.api_16k = VisqolApi()
+                self.api_16k.create(mode="speech")
+                self.api_48k = VisqolApi()
+                self.api_48k.create(mode="audio")
+            except Exception as e:
+                print(f"[Warning] Failed to initialize ViSQOL: {e}")
+
+    def measure(self, ref_wav: np.ndarray, deg_wav: np.ndarray, target_sr: int) -> float:
+        if not HAS_VISQOL:
+            return float('nan')
+        try:
+            if target_sr == 16000 and self.api_16k is not None:
+                return self.api_16k.measure_from_arrays(ref_wav, deg_wav, 16000).moslqo
+            elif target_sr == 48000 and self.api_48k is not None:
+                return self.api_48k.measure_from_arrays(ref_wav, deg_wav, 48000).moslqo
+            else:
+                return float('nan')
+        except Exception:
+            return float('nan')
+
 
 def plot_mel_spectrogram(y_true, y_pred, sr, save_path):
     """Generates a side-by-side Mel Spectrogram comparison and saves it to disk."""
@@ -28,13 +84,13 @@ def plot_mel_spectrogram(y_true, y_pred, sr, save_path):
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     
-    im1 = axes[0].imshow(mel_true, aspect='auto', origin='lower', cmap='viridis')
+    im1 = axes[0].imshow(mel_true, aspect='auto', origin='lower', cmap='magma')
     axes[0].set_title('Ground Truth Mel Spectrogram')
     axes[0].set_ylabel('Mel bins')
     axes[0].set_xlabel('Frames')
     fig.colorbar(im1, ax=axes[0], format="%+2.0f dB")
 
-    im2 = axes[1].imshow(mel_pred, aspect='auto', origin='lower', cmap='viridis')
+    im2 = axes[1].imshow(mel_pred, aspect='auto', origin='lower', cmap='magma')
     axes[1].set_title('Predicted (LISA) Mel Spectrogram')
     axes[1].set_xlabel('Frames')
     fig.colorbar(im2, ax=axes[1], format="%+2.0f dB")
@@ -43,114 +99,94 @@ def plot_mel_spectrogram(y_true, y_pred, sr, save_path):
     plt.savefig(save_path, dpi=150)
     plt.close()
 
-def evaluate_and_save(model_path, model_name, device):
-    print(f"\n" + "="*45)
+# ==============================================================================
+# 2. Main Evaluation Pipeline
+# ==============================================================================
+
+def evaluate_and_save(model_path, model_name, device, test_low_sr, test_high_sr):
+    print(f"\n" + "="*50)
     print(f"--- Evaluating {model_name} ---")
-    print("="*45)
+    print(f"--- Pair: {test_low_sr} Hz -> {test_high_sr} Hz ---")
+    print("="*50)
     
     # Load Model
     model = LISA().to(device)
     checkpoint = torch.load(model_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(checkpoint)
     model.eval()
 
-    snr_metric = SignalNoiseRatio().to(device)
+    visqol_mgr = ViSQOLManager()
+
+    # ---------------------------------------------------------
+    # Exact Continuous Scale Calculation (Approximator Removed)
+    # ---------------------------------------------------------
+    calc_high_sr = test_high_sr
+    true_scale = test_high_sr / test_low_sr
+
+    # ---------------------------------------------------------
+    # Evaluation Loop
+    # ---------------------------------------------------------
+    lsd_scores = []
+    visqol_scores = []
     
-    # ---------------------------------------------------------
-    # PHASE 1: Standard Validation Set Evaluation (0.5s chunks)
-    # ---------------------------------------------------------
-    print(f"\n[Phase 1] Evaluating Standard Val Set (Cropped Chunks)...")
-    snr_metric.reset()
-    avg_lsd_standard = 0.0
+    saved_count = 0
+    save_limit = 20
 
     with torch.no_grad():
-        for lr_wav, hr_wav in tqdm(val_loader, desc=f"Standard Val"):
-            lr_wav, hr_wav = lr_wav.to(device), hr_wav.to(device)
-            scale = val_scale
-            hsr_new = int(low_sampling_rate * scale)
-            hr_wav = resample(hr_wav, high_sampling_rate, hsr_new)
+        # FIX: Explicitly iterating over val200_loader
+        for idx, (_, hr_wav) in enumerate(tqdm(val200_loader, desc=f"Evaluating Clips")):
+            hr_wav = hr_wav.to(device)
             
-            pred = model(lr_wav, scale=scale)
-            min_len = min(pred.shape[-1], hr_wav.shape[-1])
-            pred, hr_wav = pred[..., :min_len], hr_wav[..., :min_len]
+            # Prepare exact target and input using torchaudio resample
+            hr_target = resample(hr_wav, high_sampling_rate, calc_high_sr)
+            lr_input = resample(hr_wav, high_sampling_rate, test_low_sr)
             
-            snr_metric(pred, hr_wav)
-            avg_lsd_standard += log_spectral_distance(pred, hr_wav).item()
+            # Model prediction in continuous float space
+            pred_raw = model(lr_input, scale=true_scale)
+            
+            min_len = min(pred_raw.shape[-1], hr_target.shape[-1])
+            pred_cut = pred_raw[..., :min_len]
+            hr_cut = hr_target[..., :min_len]
+            
+            # 1. LSD (Unclamped for pristine spectral accuracy)
+            lsd_scores.append(log_spectral_distance(pred_cut, hr_cut))
+            
+            # 2. ViSQOL (Strictly Clamped to prevent DSP errors)
+            if calc_high_sr in [16000, 48000] and HAS_VISQOL:
+                pred_clamped = torch.clamp(pred_cut, -0.999, 0.999)
+                ref_np = hr_cut.squeeze().detach().cpu().numpy().astype(np.float64)
+                deg_np = pred_clamped.squeeze().detach().cpu().numpy().astype(np.float64)
+                visqol_scores.append(visqol_mgr.measure(ref_np, deg_np, calc_high_sr))
 
-    final_snr_standard = snr_metric.compute().item()
-    final_lsd_standard = avg_lsd_standard / len(val_loader)
-    
-    print(f"\nPhase 1 Results for {model_name}:")
-    print(f"Standard Val SNR: {final_snr_standard:.2f} dB")
-    print(f"Standard Val LSD: {final_lsd_standard:.4f}")
-
-    # ---------------------------------------------------------
-    # PHASE 2: 12 Full-Length Samples Evaluation & Saving
-    # ---------------------------------------------------------
-    print(f"\n[Phase 2] Evaluating 12 Full-Length Samples & Saving Artifacts...")
-    snr_metric.reset()
-    pesq_metric = PerceptualEvaluationSpeechQuality(fs=16000, mode='wb').to(device)
-    pesq_metric.reset()
-    avg_lsd_12 = 0.0
-    
-    saved_audio_count = 0
-    saved_img_count = 0
-
-    with torch.no_grad():
-        for idx, (lr_wav, hr_wav) in enumerate(tqdm(val12_loader, desc=f"Full-Length 12")):
-            lr_wav, hr_wav = lr_wav.to(device), hr_wav.to(device)
-            scale = val_scale
-            hsr_new = int(low_sampling_rate * scale)
-            hr_wav = resample(hr_wav, high_sampling_rate, hsr_new)
-            
-            pred = model(lr_wav, scale=scale)
-            min_len = min(pred.shape[-1], hr_wav.shape[-1])
-            pred, hr_wav = pred[..., :min_len], hr_wav[..., :min_len]
-            
-            # Normal Metrics
-            snr_metric(pred, hr_wav)
-            avg_lsd_12 += log_spectral_distance(pred, hr_wav).item()
-            
-            # PESQ Metric (Must rigorously resample down to 16kHz & remove channel dim)
-            hr_16k = resample(hr_wav, hsr_new, 16000).squeeze(1)
-            pred_16k = resample(pred, hsr_new, 16000).squeeze(1)
-            pesq_metric(pred_16k, hr_16k)
-
-            # --- Artifact Saving Logic ---
-            # Save 4 sets of audio clips (LR, SR, and HR ground truth)
-            if saved_audio_count < 4:
-                lr_save_path = os.path.join('audio', f"{model_name}_sample{saved_audio_count}_LR.wav")
-                pred_save_path = os.path.join('audio', f"{model_name}_sample{saved_audio_count}_SR.wav")
-                hr_save_path = os.path.join('audio', f"{model_name}_sample{saved_audio_count}_HR.wav")
+            # 3. Save exactly 20 Spectrograms and Audio Artifacts
+            if saved_count < save_limit:
+                # Plot Spectrogram
+                img_save_path = os.path.join('image1', f"{model_name}_mel_comparison_{idx}.png")
+                plot_mel_spectrogram(hr_cut[0], pred_cut[0], calc_high_sr, img_save_path)
                 
-                lr_np = lr_wav[0].cpu().numpy()
-                pred_np = pred[0].cpu().numpy()
-                hr_np = hr_wav[0].cpu().numpy()
+                # Save Audio (Clamped)
+                pred_clamped = torch.clamp(pred_cut, -0.999, 0.999)
                 
-                if lr_np.ndim == 2: lr_np = lr_np.T
-                if pred_np.ndim == 2: pred_np = pred_np.T
-                if hr_np.ndim == 2: hr_np = hr_np.T
-                    
-                sf.write(lr_save_path, lr_np, low_sampling_rate)
-                sf.write(pred_save_path, pred_np, hsr_new)
-                sf.write(hr_save_path, hr_np, hsr_new)
+                # Slicing the first batch item [0] to prevent multi-channel dimension errors in soundfile
+                lr_np = lr_input[0].squeeze().detach().cpu().numpy().astype(np.float32)
+                pred_np = pred_clamped[0].squeeze().detach().cpu().numpy().astype(np.float32)
+                hr_np = hr_cut[0].squeeze().detach().cpu().numpy().astype(np.float32)
                 
-                saved_audio_count += 1
-            
-            # Save 2 mel spectrogram comparisons
-            elif saved_img_count < 2:
-                img_save_path = os.path.join('image', f"{model_name}_mel_comparison_{saved_img_count}.png")
-                plot_mel_spectrogram(hr_wav[0], pred[0], hsr_new, img_save_path)
-                saved_img_count += 1
+                sf.write(os.path.join('audio1', f"{model_name}_sample{idx}_LR_{test_low_sr}.wav"), lr_np, test_low_sr)
+                sf.write(os.path.join('audio1', f"{model_name}_sample{idx}_SR_{calc_high_sr}.wav"), pred_np, calc_high_sr)
+                sf.write(os.path.join('audio1', f"{model_name}_sample{idx}_HR_{calc_high_sr}.wav"), hr_np, calc_high_sr)
+                
+                saved_count += 1
 
-    final_snr_12 = snr_metric.compute().item()
-    final_lsd_12 = avg_lsd_12 / len(val12_loader)
-    final_pesq_12 = pesq_metric.compute().item()
+    final_lsd = float(np.nanmean(lsd_scores))
+    final_visqol = float(np.nanmean(visqol_scores)) if len(visqol_scores) > 0 else float('nan')
     
-    print(f"\nPhase 2 Results for {model_name} (12 Full-Length Samples):")
-    print(f"Subset SNR:  {final_snr_12:.2f} dB")
-    print(f"Subset LSD:  {final_lsd_12:.4f}")
-    print(f"Subset PESQ: {final_pesq_12:.4f} (Wide-Band)")
+    print(f"\nFinal Results for {model_name} ({test_low_sr} Hz -> {calc_high_sr} Hz):")
+    print(f"Mean LSD:    {final_lsd:.4f} dB")
+    if not math.isnan(final_visqol):
+        print(f"Mean ViSQOL: {final_visqol:.4f} MOS-LQO")
+    else:
+        print("Mean ViSQOL: N/A (Only supports 16kHz or 48kHz target)")
 
 
 def main():
@@ -158,24 +194,20 @@ def main():
     print(f"Using device: {device}")
     
     # Ensure directories exist
-    os.makedirs('audio', exist_ok=True)
-    os.makedirs('image', exist_ok=True)
+    os.makedirs('audio1', exist_ok=True)
+    os.makedirs('image1', exist_ok=True)
     
-    # Model paths
-    best_snr_path = os.path.join('models', 'lisa_best_model_snr.pt')
-    best_lsd_path = os.path.join('models', 'lisa_best_model_lsd.pt')
+    # --- Set Specific Evaluation Pair Here ---
+    target_input_sr = 16000
+    target_output_sr = 48000
+    
+    best_lsd_path = os.path.join('models', 'lisa_final_epoch01.pt')
 
-    # Evaluate SNR Model
-    if os.path.exists(best_snr_path):
-        evaluate_and_save(best_snr_path, 'Best_SNR_Model', device)
-    else:
-        print(f"Warning: Could not find {best_snr_path}. Skipping.")
-
-    # Evaluate LSD Model
+    # Evaluate Model
     if os.path.exists(best_lsd_path):
-        evaluate_and_save(best_lsd_path, 'Best_LSD_Model', device)
+        evaluate_and_save(best_lsd_path, 'Best_LSD_Model', device, target_input_sr, target_output_sr)
     else:
-        print(f"Warning: Could not find {best_lsd_path}. Skipping.")
+        print(f"Warning: Could not find {best_lsd_path}.")
 
 if __name__ == '__main__':
     main()

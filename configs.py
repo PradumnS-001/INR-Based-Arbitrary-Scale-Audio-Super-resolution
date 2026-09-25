@@ -1,7 +1,7 @@
 BASE_PATH = 'Data/VCTKCorpus'
 seed = 42
 
-low_sampling_rate = 8000
+low_sampling_rate = 16000
 high_sampling_rate = 48000
 val_scale = 2
 

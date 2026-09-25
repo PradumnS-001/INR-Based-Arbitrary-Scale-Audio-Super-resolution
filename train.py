@@ -120,9 +120,8 @@ def main():
         
         print(f"Epoch {epoch} | Train Loss: {avg_train_loss:.4f} | Val SNR: {current_val_snr:.2f} | Val LSD: {current_val_lsd:.4f}")
         scheduler.step()
-        
-        if epoch == epochs - 1:
-            torch.save(model.state_dict(), os.path.join('models', f"lisa_final_epoch.pt"))
+
+        torch.save(model.state_dict(), os.path.join('models', f"lisa_final_epoch.pt"))
         
 if __name__ == "__main__":
     main()
