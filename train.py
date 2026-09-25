@@ -167,9 +167,11 @@ def main():
                 
                 ema.update(model)
                 global_step += 1
-
-            pbar.set_postfix({"G_loss": loss_G.item() * update_step})
-            torch.cuda.empty_cache()
+                
+            if step % 10 == 0:
+                loss_G = loss_G.detach()
+                pbar.set_postfix({"G_loss": loss_G.item() * update_step})
+        torch.cuda.empty_cache()
 
         scheduler_G.step()
         if do_adversarial: scheduler_D.step()
@@ -181,7 +183,7 @@ def main():
         avg_lsd = 0.0
 
         with torch.no_grad():
-            for _, hr_wav in val_loader:
+            for hr_wav in val_loader:
                 hr_wav = hr_wav.to(device)
                 hr_target = resample_to_max(hr_wav) if high_sampling_rate != max_target_sr else hr_wav
                 

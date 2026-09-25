@@ -17,6 +17,7 @@ except ImportError:
 from configs import *
 from data import test_loader
 from models import SIRIUS
+from utility import count_params
 
 # ==============================================================================
 # 1. Resampling & Audio Caching Helpers
@@ -43,7 +44,7 @@ def preload_validation_set(loader, device):
     """Preloads validation audio into memory to prevent repeated disk I/O."""
     print("Pre-loading validation audio dataset into memory...")
     cached_hr = []
-    for _, hr_wav in loader:
+    for hr_wav in loader:
         cached_hr.append(hr_wav.to(device).float())
     return cached_hr
 
@@ -171,8 +172,8 @@ def evaluate_pair(model, cached_hr, resampler, low_sr, high_sr, visqol_mgr, comp
         base_cut = baseline_hr[..., :min_len]
 
         # UNCLAMPED evaluation for pristine spectral gradients
-        lsd_scores.append(log_spectral_distance(pred_cut, target_cut))
-        base_lsd_scores.append(log_spectral_distance(base_cut, target_cut))
+        lsd_scores.append(log_spectral_distance(pred_cut, target_cut).detach().item())
+        base_lsd_scores.append(log_spectral_distance(base_cut, target_cut).detach().item())
 
         # CLAMPED evaluation for DSP constraints
         if compute_visqol and high_sr in (16000, 48000) and HAS_VISQOL:
@@ -234,6 +235,7 @@ def run_comprehensive_evaluation(
     os.makedirs(out_dir_plots, exist_ok=True)
 
     model = SIRIUS(mean=0.0, std=0.0594).to(device)
+    count_params(model=model)
     model.load_checkpoint(model_path, device)
     model.eval()
 
@@ -326,7 +328,7 @@ def main():
     custom_low_sr = 11025
     custom_high_sr = 44100
 
-    last_model_path = os.path.join('models', 'lisa_last_model03.pt')
+    last_model_path = os.path.join('models', 'sirius_last_model.pt')
 
     if os.path.exists(last_model_path):
         run_comprehensive_evaluation(

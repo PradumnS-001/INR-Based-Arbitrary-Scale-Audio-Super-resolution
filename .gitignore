@@ -11,3 +11,5 @@ __pypackages__/
 env/
 venv/
 Data/
+test_outputs/
+models/

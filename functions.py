@@ -13,8 +13,8 @@ def log_spectral_distance(y_hat:torch.Tensor, y:torch.Tensor, n_fft = 512)->torc
     s = torch.stft(y.squeeze(1) if y.ndim > 1 else y, 
                     n_fft, return_complex=True, window=window).abs().pow(2)
     
-    log10_s_hat = torch.log10(s_hat + 1e-10)
-    log10_s = torch.log10(s + 1e-10)
+    log10_s_hat = torch.log10(s_hat + 1e-7)
+    log10_s = torch.log10(s + 1e-7)
     
     dist_per_frame = torch.sqrt(torch.mean((log10_s - log10_s_hat)**2, dim=-2))
     return torch.mean(dist_per_frame)
