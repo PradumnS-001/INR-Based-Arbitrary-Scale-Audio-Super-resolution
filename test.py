@@ -124,29 +124,6 @@ def plot_unified_spectrograms(gt_48k, pred_8_16, pred_8_48, pred_16_48, save_pat
     plt.savefig(save_path, dpi=180, bbox_inches='tight')
     plt.close()
 
-def plot_scale_sweep(scales, lsd_values, title, xlabel, save_path):
-    """Generates a clean, single-axis publication-ready plot strictly for LSD vs scale."""
-    fig, ax1 = plt.subplots(figsize=(10, 5.5))
-
-    color_lsd = '#d62728'
-    ax1.set_xlabel(xlabel, fontsize=12, fontweight='bold', labelpad=8)
-    ax1.set_ylabel("Log Spectral Distance (LSD) [dB] ↓", color=color_lsd, fontsize=12, fontweight='bold')
-    
-    valid_lsd = [(s, v) for s, v in zip(scales, lsd_values) if not math.isnan(v)]
-    if valid_lsd:
-        s_lsd, v_lsd = zip(*valid_lsd)
-        ax1.plot(s_lsd, v_lsd, color=color_lsd, marker='o', linewidth=2.2, label='LSD (Lower is better)')
-
-    ax1.tick_params(axis='y', labelcolor=color_lsd, labelsize=11)
-    ax1.tick_params(axis='x', labelsize=11)
-    ax1.grid(True, linestyle='--', alpha=0.5)
-
-    ax1.legend(loc='best', framealpha=0.9, fontsize=10)
-    plt.title(title, fontsize=13, fontweight='bold', pad=12)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=180)
-    plt.close()
-
 # ==============================================================================
 # 4. Core Pipeline Evaluation Routine
 # ==============================================================================
@@ -259,12 +236,12 @@ def run_comprehensive_evaluation(
     for (l_sr, h_sr) in tqdm(lsd_pairs, desc="Evaluating LSD Pairs"):
         scale_ratio = h_sr / l_sr
         tag = "Custom" if (l_sr, h_sr) == (custom_low_sr, custom_high_sr) else "Standard"
-        lsd_val, base_lsd, _, _ = evaluate_pair(model, cached_hr, resampler, l_sr, h_sr, visqol_mgr, compute_visqol=False)
-        lsd_table_rows.append([f"{l_sr} Hz", f"{h_sr} Hz", f"{scale_ratio:.2f}x", tag, f"{lsd_val:.4f}", f"{base_lsd:.4f}"])
+        lsd_val, _, _, _ = evaluate_pair(model, cached_hr, resampler, l_sr, h_sr, visqol_mgr, compute_visqol=False)
+        lsd_table_rows.append([f"{l_sr} Hz", f"{h_sr} Hz", f"{scale_ratio:.2f}x", tag, f"{lsd_val:.4f}"])
 
     print_ascii_table(
         f"LSD Multi-Scale Evaluation ({model_name})",
-        ["Input SR", "Target SR", "Scale", "Type", "Model LSD [dB]", "Base LSD [dB]"],
+        ["Input SR", "Target SR", "Scale", "Type", "Model LSD [B]"],
         lsd_table_rows
     )
 
