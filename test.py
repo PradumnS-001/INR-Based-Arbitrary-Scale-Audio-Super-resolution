@@ -206,10 +206,8 @@ def run_comprehensive_evaluation(
 
     out_dir_audio = os.path.join('test_outputs', model_name, 'audio')
     out_dir_img = os.path.join('test_outputs', model_name, 'images')
-    out_dir_plots = os.path.join('test_outputs', model_name, 'plots')
     os.makedirs(out_dir_audio, exist_ok=True)
     os.makedirs(out_dir_img, exist_ok=True)
-    os.makedirs(out_dir_plots, exist_ok=True)
 
     model = SIRIUS(mean=0.0, std=0.0594).to(device)
     count_params(model=model)

@@ -13,3 +13,4 @@ venv/
 Data/
 test_outputs/
 models/
+dummy_folder/
