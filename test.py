@@ -16,8 +16,7 @@ except ImportError:
 
 from configs import *
 from data import test_loader
-from models import SIRIUS
-from utility import count_params
+from models import SIRIUS, LISA
 
 # ==============================================================================
 # 1. Resampling & Audio Caching Helpers
@@ -84,16 +83,16 @@ class ViSQOLManager:
 # 3. Formatted Visualizations (Spectrograms & Comparison Sweeps)
 # ==============================================================================
 
-def plot_unified_spectrograms(gt_48k, pred_8_16, pred_8_48, pred_16_48, save_path):
-    """Renders a 1x4 grid containing Ground Truth and the 3 target predictions."""
+def plot_2x2_spectrograms(gt_wav, lr_wav, lisa_wav, sirius_wav, h_sr, l_sr, save_path):
+    """Renders a 2x2 grid containing Ground Truth, Input, LISA Baseline, and SIRIUS predictions."""
     panels = [
-        ("Ground Truth (48 kHz)", gt_48k.cpu(), 48000),
-        ("Prediction: 8 kHz → 16 kHz", pred_8_16.cpu(), 16000),
-        ("Prediction: 8 kHz → 48 kHz", pred_8_48.cpu(), 48000),
-        ("Prediction: 16 kHz → 48 kHz", pred_16_48.cpu(), 48000),
+        ("Ground Truth", gt_wav.cpu(), h_sr),
+        ("Input", lr_wav.cpu(), l_sr),
+        ("LISA Baseline", lisa_wav.cpu(), h_sr),
+        ("SIRIUS (Ours)", sirius_wav.cpu(), h_sr),
     ]
 
-    fig, axes = plt.subplots(1, 4, figsize=(40, 10))
+    fig, axes = plt.subplots(2, 2, figsize=(20, 12))
     axes = axes.flatten()
 
     for idx, (title, wav, sr) in enumerate(panels):
@@ -114,9 +113,9 @@ def plot_unified_spectrograms(gt_48k, pred_8_16, pred_8_48, pred_16_48, save_pat
             cmap='magma',
             extent=[0, duration_sec, 0, freq_max_khz]
         )
-        axes[idx].set_title(title, fontsize=13, fontweight='bold', pad=8)
-        axes[idx].set_xlabel("Time (s)", fontsize=11)
-        axes[idx].set_ylabel("Frequency (kHz)", fontsize=11)
+        axes[idx].set_title(f"{title} ({sr//1000} kHz)", fontsize=14, fontweight='bold', pad=8)
+        axes[idx].set_xlabel("Time (s)", fontsize=12)
+        axes[idx].set_ylabel("Frequency (kHz)", fontsize=12)
         cbar = fig.colorbar(im, ax=axes[idx], format="%+2.0f dB")
         cbar.ax.tick_params(labelsize=10)
 
@@ -129,48 +128,62 @@ def plot_unified_spectrograms(gt_48k, pred_8_16, pred_8_48, pred_16_48, save_pat
 # ==============================================================================
 
 @torch.no_grad()
-def evaluate_pair(model, cached_hr, resampler, low_sr, high_sr, visqol_mgr, compute_visqol=True):
-    """Evaluates the model over a single (low_sr -> high_sr) pair across all clips."""
-    lsd_scores = []
-    base_lsd_scores = []
-    visqol_scores = []
-    base_visqol_scores = []
+def evaluate_pair(model_sirius, model_lisa_8k, model_lisa_16k, cached_hr, resampler, low_sr, high_sr, visqol_mgr, compute_visqol=True):
+    """Evaluates SIRIUS and applicable LISA baseline over a single (low_sr -> high_sr) pair across all clips."""
+    lsd_sirius_scores = []
+    lsd_lisa_scores = []
+    visqol_sirius_scores = []
+    visqol_lisa_scores = []
+
+    # Conditionally select the LISA baseline depending on the incoming low sampling rate
+    lisa_model = None
+    if low_sr == 8000:
+        lisa_model = model_lisa_8k
+    elif low_sr == 16000:
+        lisa_model = model_lisa_16k
 
     for hr_wav in cached_hr:
         hr_target = resampler.resample(hr_wav, high_sampling_rate, high_sr)
         lr_input = resampler.resample(hr_wav, high_sampling_rate, low_sr)
-        baseline_hr = resampler.resample(lr_input, low_sr, high_sr)
 
-        pred_raw = model(lr_input, low_sr, high_sr)
+        pred_sirius = model_sirius(lr_input, low_sr, high_sr)
+        pred_lisa = lisa_model(lr_input, high_sr / low_sr) if lisa_model is not None else None
 
-        min_len = min(pred_raw.shape[-1], hr_target.shape[-1], baseline_hr.shape[-1])
-        pred_cut = pred_raw[..., :min_len]
+        # Determine shared minimum length for un-clamped comparison
+        min_len = min(pred_sirius.shape[-1], hr_target.shape[-1])
+        if pred_lisa is not None:
+            min_len = min(min_len, pred_lisa.shape[-1])
+            
+        pred_sirius_cut = pred_sirius[..., :min_len]
         target_cut = hr_target[..., :min_len]
-        base_cut = baseline_hr[..., :min_len]
 
         # UNCLAMPED evaluation for pristine spectral gradients
-        lsd_scores.append(log_spectral_distance(pred_cut, target_cut).detach().item())
-        base_lsd_scores.append(log_spectral_distance(base_cut, target_cut).detach().item())
+        lsd_sirius_scores.append(log_spectral_distance(pred_sirius_cut, target_cut).detach().item())
+        
+        if pred_lisa is not None:
+            pred_lisa_cut = pred_lisa[..., :min_len]
+            lsd_lisa_scores.append(log_spectral_distance(pred_lisa_cut, target_cut).detach().item())
 
-        # CLAMPED evaluation for DSP constraints
+        # CLAMPED evaluation for DSP constraints (ViSQOL)
         if compute_visqol and high_sr in (16000, 48000) and HAS_VISQOL:
-            pred_clamped = torch.clamp(pred_cut, -0.999, 0.999)
-            base_clamped = torch.clamp(base_cut, -0.999, 0.999)
-            
             # Explicitly detached before converting to numpy
             ref_np = target_cut.squeeze().detach().cpu().numpy().astype(np.float64)
-            deg_np = pred_clamped.squeeze().detach().cpu().numpy().astype(np.float64)
-            base_np = base_clamped.squeeze().detach().cpu().numpy().astype(np.float64)
             
-            visqol_scores.append(visqol_mgr.measure(ref_np, deg_np, high_sr))
-            base_visqol_scores.append(visqol_mgr.measure(ref_np, base_np, high_sr))
+            pred_sirius_clamped = torch.clamp(pred_sirius_cut, -0.999, 0.999)
+            deg_sirius_np = pred_sirius_clamped.squeeze().detach().cpu().numpy().astype(np.float64)
+            visqol_sirius_scores.append(visqol_mgr.measure(ref_np, deg_sirius_np, high_sr))
+            
+            if pred_lisa is not None:
+                pred_lisa_clamped = torch.clamp(pred_lisa_cut, -0.999, 0.999)
+                deg_lisa_np = pred_lisa_clamped.squeeze().detach().cpu().numpy().astype(np.float64)
+                visqol_lisa_scores.append(visqol_mgr.measure(ref_np, deg_lisa_np, high_sr))
 
-    mean_lsd = float(np.nanmean(lsd_scores))
-    mean_base_lsd = float(np.nanmean(base_lsd_scores))
-    mean_visqol = float(np.nanmean(visqol_scores)) if len(visqol_scores) > 0 else float('nan')
-    mean_base_visqol = float(np.nanmean(base_visqol_scores)) if len(base_visqol_scores) > 0 else float('nan')
+    mean_lsd_sirius = float(np.nanmean(lsd_sirius_scores))
+    mean_lsd_lisa = float(np.nanmean(lsd_lisa_scores)) if lsd_lisa_scores else float('nan')
+    mean_visqol_sirius = float(np.nanmean(visqol_sirius_scores)) if len(visqol_sirius_scores) > 0 else float('nan')
+    mean_visqol_lisa = float(np.nanmean(visqol_lisa_scores)) if len(visqol_lisa_scores) > 0 else float('nan')
     
-    return mean_lsd, mean_base_lsd, mean_visqol, mean_base_visqol
+    return mean_lsd_sirius, mean_lsd_lisa, mean_visqol_sirius, mean_visqol_lisa
 
 
 def print_ascii_table(title: str, headers: list[str], rows: list[list[str]]):
@@ -196,23 +209,36 @@ def print_ascii_table(title: str, headers: list[str], rows: list[list[str]]):
 # ==============================================================================
 
 def run_comprehensive_evaluation(
-    model_path: str,
-    model_name: str,
+    sirius_path: str,
+    lisa_8k_path: str,
+    lisa_16k_path: str,
     device: str,
     custom_low_sr: int = 11025,
     custom_high_sr: int = 44100
 ):
-    print(f"\n{'='*70}\nSTARTING COMPREHENSIVE EVALUATION FOR: {model_name}\n{'='*70}")
+    print(f"\n{'='*70}\nSTARTING COMPREHENSIVE EVALUATION\n{'='*70}")
 
     out_dir_audio = os.path.join('test_outputs', 'audio')
     out_dir_img = os.path.join('test_outputs', 'images')
     os.makedirs(out_dir_audio, exist_ok=True)
     os.makedirs(out_dir_img, exist_ok=True)
 
-    model = SIRIUS(mean=0.0, std=0.0594).to(device)
-    count_params(model=model)
-    model.load_checkpoint(model_path, device)
-    model.eval()
+    # 1. Load SIRIUS
+    model_sirius = SIRIUS(mean=0.0, std=0.0594).to(device)
+    model_sirius.load_checkpoint(sirius_path, device)
+    model_sirius.eval()
+
+    # 2. Load LISA 8k Baseline
+    model_lisa_8k = LISA().to(device)
+    if os.path.exists(lisa_8k_path):
+        model_lisa_8k.load_checkpoint(lisa_8k_path, device)
+    model_lisa_8k.eval()
+
+    # 3. Load LISA 16k Baseline
+    model_lisa_16k = LISA().to(device)
+    if os.path.exists(lisa_16k_path):
+        model_lisa_16k.load_checkpoint(lisa_16k_path, device)
+    model_lisa_16k.eval()
 
     resampler = AudioResampleCache(device)
     visqol_mgr = ViSQOLManager()
@@ -222,10 +248,8 @@ def run_comprehensive_evaluation(
     # Task A: Multi-Scale LSD Evaluation
     # --------------------------------------------------------------------------
     lsd_pairs = [
-        (8000, 16000), (8000, 24000), (8000, 48000),
-        (16000, 24000), (16000, 48000),
-        (24000, 48000),
-        (12000, 24000), (12000, 48000),
+        (8000, 16000), (8000, 48000),
+        (16000, 48000),
         (custom_low_sr, custom_high_sr)
     ]
 
@@ -234,12 +258,16 @@ def run_comprehensive_evaluation(
     for (l_sr, h_sr) in tqdm(lsd_pairs, desc="Evaluating LSD Pairs"):
         scale_ratio = h_sr / l_sr
         tag = "Custom" if (l_sr, h_sr) == (custom_low_sr, custom_high_sr) else "Standard"
-        lsd_val, _, _, _ = evaluate_pair(model, cached_hr, resampler, l_sr, h_sr, visqol_mgr, compute_visqol=False)
-        lsd_table_rows.append([f"{l_sr} Hz", f"{h_sr} Hz", f"{scale_ratio:.2f}x", tag, f"{lsd_val:.4f}"])
+        lsd_sirius, lsd_lisa, _, _ = evaluate_pair(model_sirius, model_lisa_8k, model_lisa_16k, cached_hr, resampler, l_sr, h_sr, visqol_mgr, compute_visqol=False)
+        
+        sirius_str = f"{lsd_sirius:.4f}"
+        lisa_str = f"{lsd_lisa:.4f}" if not math.isnan(lsd_lisa) else "-"
+        
+        lsd_table_rows.append([f"{l_sr} Hz", f"{h_sr} Hz", f"{scale_ratio:.2f}x", tag, sirius_str, lisa_str])
 
     print_ascii_table(
-        f"LSD Multi-Scale Evaluation ({model_name})",
-        ["Input SR", "Target SR", "Scale", "Type", "Model LSD [B]"],
+        f"LSD Multi-Scale Evaluation",
+        ["Input SR", "Target SR", "Scale", "Type", "SIRIUS LSD", "LISA LSD"],
         lsd_table_rows
     )
 
@@ -247,24 +275,24 @@ def run_comprehensive_evaluation(
     # Task B: Upward ViSQOL Evaluation
     # --------------------------------------------------------------------------
     visqol_pairs = [
-        (8000, 16000), (12000, 16000),
-        (8000, 48000), (12000, 48000), (16000, 48000), (24000, 48000)
+        (8000, 16000),
+        (8000, 48000),(16000, 48000)
     ]
 
     print("\n--- Running Upward ViSQOL Suite ---")
     visqol_table_rows = []
     for (l_sr, h_sr) in tqdm(visqol_pairs, desc="Evaluating ViSQOL Pairs"):
         mode = "Speech (16k)" if h_sr == 16000 else "Audio (48k)"
-        _, _, visqol_val, base_visqol_val = evaluate_pair(model, cached_hr, resampler, l_sr, h_sr, visqol_mgr, compute_visqol=True)
+        _, _, visqol_sirius, visqol_lisa = evaluate_pair(model_sirius, model_lisa_8k, model_lisa_16k, cached_hr, resampler, l_sr, h_sr, visqol_mgr, compute_visqol=True)
         
-        vis_str = f"{visqol_val:.4f}" if not math.isnan(visqol_val) else "N/A"
-        base_vis_str = f"{base_visqol_val:.4f}" if not math.isnan(base_visqol_val) else "N/A"
+        sirius_str = f"{visqol_sirius:.4f}" if not math.isnan(visqol_sirius) else "N/A"
+        lisa_str = f"{visqol_lisa:.4f}" if not math.isnan(visqol_lisa) else "-"
         
-        visqol_table_rows.append([f"{l_sr} Hz", f"{h_sr} Hz", mode, vis_str, base_vis_str])
+        visqol_table_rows.append([f"{l_sr} Hz", f"{h_sr} Hz", mode, sirius_str, lisa_str])
 
     print_ascii_table(
-        f"ViSQOL Upward Evaluation ({model_name})",
-        ["Input SR", "Target Anchor", "ViSQOL Mode", "Model MOS", "Base MOS"],
+        f"ViSQOL Upward Evaluation",
+        ["Input SR", "Target Anchor", "ViSQOL Mode", "SIRIUS MOS", "LISA MOS"],
         visqol_table_rows
     )
 
@@ -274,24 +302,57 @@ def run_comprehensive_evaluation(
     print("\n--- Saving Spectrograms and Audio Artifacts ---")
     num_to_save = min(20, len(cached_hr))
 
-    for idx in range(num_to_save):
-        hr_raw = cached_hr[idx]
-        gt_48k = resampler.resample(hr_raw, high_sampling_rate, 48000)
+    img_dirs = {
+        "8k_to_48k": os.path.join(out_dir_img, "8k_to_48k"),
+        "16k_to_48k": os.path.join(out_dir_img, "16k_to_48k"),
+        "8k_to_16k": os.path.join(out_dir_img, "8k_to_16k")
+    }
+    for d in img_dirs.values():
+        os.makedirs(d, exist_ok=True)
+        
+    with torch.no_grad():
+        for idx in range(num_to_save):
+            clip_audio_dir = os.path.join(out_dir_audio, f"clip_{idx}")
+            os.makedirs(clip_audio_dir, exist_ok=True)
 
-        lr_8k = resampler.resample(hr_raw, high_sampling_rate, 8000)
-        lr_16k = resampler.resample(hr_raw, high_sampling_rate, 16000)
+            hr_raw = cached_hr[idx]
+            gt_48k = resampler.resample(hr_raw, high_sampling_rate, 48000)
+            gt_16k = resampler.resample(hr_raw, high_sampling_rate, 16000)
 
-        pred_8_16 = torch.clamp(model(lr_8k, 8000, 16000), -0.999, 0.999)
-        pred_8_48 = torch.clamp(model(lr_8k, 8000, 48000), -0.999, 0.999)
-        pred_16_48 = torch.clamp(model(lr_16k, 16000, 48000), -0.999, 0.999)
+            lr_8k = resampler.resample(hr_raw, high_sampling_rate, 8000)
+            lr_16k = gt_16k # No interpolation resample needed here as it maps to its own scale limit
 
-        spec_path = os.path.join(out_dir_img, f"clip_{idx}_unified_mel.png")
-        plot_unified_spectrograms(gt_48k, pred_8_16, pred_8_48, pred_16_48, spec_path)
+            # ----------------
+            # 1. 8k -> 16k
+            # ----------------
+            sirius_8_16 = torch.clamp(model_sirius(lr_8k, 8000, 16000), -0.999, 0.999)
+            lisa_8_16 = torch.clamp(model_lisa_8k(lr_8k, 2.0), -0.999, 0.999)
+            plot_2x2_spectrograms(gt_16k, lr_8k, lisa_8_16, sirius_8_16, 16000, 8000, os.path.join(img_dirs["8k_to_16k"], f"clip_{idx}.png"))
 
-        sf.write(os.path.join(out_dir_audio, f"clip_{idx}_GT_48k.wav"), gt_48k.squeeze().detach().cpu().numpy(), 48000)
-        sf.write(os.path.join(out_dir_audio, f"clip_{idx}_Pred_8k_to_16k.wav"), pred_8_16.squeeze().detach().cpu().numpy(), 16000)
-        sf.write(os.path.join(out_dir_audio, f"clip_{idx}_Pred_8k_to_48k.wav"), pred_8_48.squeeze().detach().cpu().numpy(), 48000)
-        sf.write(os.path.join(out_dir_audio, f"clip_{idx}_Pred_16k_to_48k.wav"), pred_16_48.squeeze().detach().cpu().numpy(), 48000)
+            # ----------------
+            # 2. 8k -> 48k
+            # ----------------
+            sirius_8_48 = torch.clamp(model_sirius(lr_8k, 8000, 48000), -0.999, 0.999)
+            lisa_8_48 = torch.clamp(model_lisa_8k(lr_8k, 6.0), -0.999, 0.999)
+            plot_2x2_spectrograms(gt_48k, lr_8k, lisa_8_48, sirius_8_48, 48000, 8000, os.path.join(img_dirs["8k_to_48k"], f"clip_{idx}.png"))
+
+            # ----------------
+            # 3. 16k -> 48k
+            # ----------------
+            sirius_16_48 = torch.clamp(model_sirius(lr_16k, 16000, 48000), -0.999, 0.999)
+            lisa_16_48 = torch.clamp(model_lisa_16k(lr_16k, 3.0), -0.999, 0.999)
+            plot_2x2_spectrograms(gt_48k, lr_16k, lisa_16_48, sirius_16_48, 48000, 16000, os.path.join(img_dirs["16k_to_48k"], f"clip_{idx}.png"))
+
+            # ----------------
+            # Audio File Write out
+            # ----------------
+            sf.write(os.path.join(clip_audio_dir, "GT_48k.wav"), gt_48k.squeeze().detach().cpu().numpy(), 48000)
+            sf.write(os.path.join(clip_audio_dir, "LISA_8k_to_16k.wav"), lisa_8_16.squeeze().detach().cpu().numpy(), 16000)
+            sf.write(os.path.join(clip_audio_dir, "SIRIUS_8k_to_16k.wav"), sirius_8_16.squeeze().detach().cpu().numpy(), 16000)
+            sf.write(os.path.join(clip_audio_dir, "LISA_8k_to_48k.wav"), lisa_8_48.squeeze().detach().cpu().numpy(), 48000)
+            sf.write(os.path.join(clip_audio_dir, "SIRIUS_8k_to_48k.wav"), sirius_8_48.squeeze().detach().cpu().numpy(), 48000)
+            sf.write(os.path.join(clip_audio_dir, "LISA_16k_to_48k.wav"), lisa_16_48.squeeze().detach().cpu().numpy(), 48000)
+            sf.write(os.path.join(clip_audio_dir, "SIRIUS_16k_to_48k.wav"), sirius_16_48.squeeze().detach().cpu().numpy(), 48000)
 
 # ==============================================================================
 # Main Entry Point
@@ -300,21 +361,24 @@ def run_comprehensive_evaluation(
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    custom_low_sr = 11025
+    custom_low_sr = 22050
     custom_high_sr = 44100
 
-    last_model_path = os.path.join('models', 'sirius_last_model.pt')
+    sirius_path = os.path.join('models', 'sirius_last_model.pt')
+    lisa_8k_path = os.path.join('models', 'lisa_8k.pt')
+    lisa_16k_path = os.path.join('models', 'lisa_16k.pt')
 
-    if os.path.exists(last_model_path):
+    if os.path.exists(sirius_path):
         run_comprehensive_evaluation(
-            model_path=last_model_path,
-            model_name='Last_Epoch_Model',
+            sirius_path=sirius_path,
+            lisa_8k_path=lisa_8k_path,
+            lisa_16k_path=lisa_16k_path,
             device=device,
             custom_low_sr=custom_low_sr,
             custom_high_sr=custom_high_sr
         )
     else:
-        print(f"Error: No checkpoints found at '{last_model_path}'.")
+        print(f"Error: SIRIUS checkpoint not found at '{sirius_path}'.")
 
 if __name__ == '__main__':
     main()
