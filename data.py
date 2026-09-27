@@ -83,7 +83,7 @@ def calculate_stats(data: AudioCorpus) -> torch.Tensor:
     total_sq_sum = 0.0
     total_elements = 0
     
-    for _,hr_wav in data:
+    for hr_wav in data:
         
         total_sum += hr_wav.sum().item()
         total_sq_sum += (hr_wav ** 2).sum().item()

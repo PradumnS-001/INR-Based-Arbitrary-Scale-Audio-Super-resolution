@@ -27,7 +27,7 @@ def main():
     os.makedirs('models', exist_ok=True)
     os.makedirs('runs', exist_ok=True)
     
-    writer = SummaryWriter(log_dir='runs/sirius_run_01')
+    writer = SummaryWriter(log_dir='runs/sirius_logs')
     global_step = 0
     
     ## Values Obtained from the calculate_stats function in data.py
@@ -63,9 +63,10 @@ def main():
     cos_sch_G = torch.optim.lr_scheduler.CosineAnnealingLR(opt_G, T_max= epochs-step_size, eta_min=lr/100)
     scheduler_G = torch.optim.lr_scheduler.SequentialLR(opt_G, schedulers=[cons_sch_G, cos_sch_G], milestones=[step_size])
     
-    cons_sch_D = torch.optim.lr_scheduler.ConstantLR(opt_D, factor=1.0, total_iters=10)
-    cos_sch_D = torch.optim.lr_scheduler.CosineAnnealingLR(opt_D, T_max= epochs-step_size, eta_min=lr/50)
-    scheduler_D = torch.optim.lr_scheduler.SequentialLR(opt_D, schedulers=[cons_sch_D, cos_sch_D], milestones=[step_size])
+    if do_adversarial:
+        cons_sch_D = torch.optim.lr_scheduler.ConstantLR(opt_D, factor=1.0, total_iters=10)
+        cos_sch_D = torch.optim.lr_scheduler.CosineAnnealingLR(opt_D, T_max= epochs-step_size, eta_min=lr/50)
+        scheduler_D = torch.optim.lr_scheduler.SequentialLR(opt_D, schedulers=[cons_sch_D, cos_sch_D], milestones=[step_size])
 
     snr_metric = SignalNoiseRatio().to(device)
     

@@ -204,8 +204,8 @@ def run_comprehensive_evaluation(
 ):
     print(f"\n{'='*70}\nSTARTING COMPREHENSIVE EVALUATION FOR: {model_name}\n{'='*70}")
 
-    out_dir_audio = os.path.join('test_outputs', model_name, 'audio')
-    out_dir_img = os.path.join('test_outputs', model_name, 'images')
+    out_dir_audio = os.path.join('test_outputs', 'audio')
+    out_dir_img = os.path.join('test_outputs', 'images')
     os.makedirs(out_dir_audio, exist_ok=True)
     os.makedirs(out_dir_img, exist_ok=True)
 
